@@ -6,6 +6,11 @@ package-lock.json
 source/**
 !source/__init__.py
 !source/antigravity/*.py
+!source/antigravity/presentation/*.py
+!source/antigravity/presentation/**/*.py
+!source/mcp/*.py
+ACP-QUESTIONS.md
+DEVIN-SYSTEM-PROMPT.md
 tests/**
 dist/tests/**
 dist/source/monitor.js
@@ -13,4 +18,7 @@ dist/source/picker/**
 dist/source/status/**
 bin/**
 node_modules/**
+**/__pycache__/**
+**/*.pyc
+**/*.pyo
 *.vsix
