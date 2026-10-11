@@ -341,6 +341,12 @@ def stop_child(process: subprocess.Popen) -> None:
 def devin_model_uid(value: object) -> str | None:
     if not isinstance(value, str) or not value:
         return None
+    aliases = {
+        "gemini-pro-agent": "gemini-3-1-pro-high",
+        "claude-sonnet-4-6": "claude-sonnet-4-6-thinking",
+    }
+    if value in aliases:
+        return aliases[value]
     gemini_flash = re.fullmatch(r"gemini-3(?:\.0)?-flash-(minimal|low|medium|high)", value)
     if gemini_flash is not None:
         return f"MODEL_GOOGLE_GEMINI_3_0_FLASH_{gemini_flash.group(1).upper()}"

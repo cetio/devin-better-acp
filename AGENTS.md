@@ -51,10 +51,12 @@ permissions, and client capabilities without rebuilding the conversation.
 `--spoof-zed` changes only the downstream `initialize.clientInfo.name`;
 `--registry-entry` prints a Desktop agent entry. Its `devin-better-antigravity`
 ID opts into Desktop's Devin Local model picker. The shim maps decimal-version
-model option IDs (and Gemini 3 Flash IDs) to Devin catalog UIDs and translates
-selections back to Antigravity; unmatched IDs remain unchanged and are omitted
-by the catalog-backed picker. Desktop may apply other `devin*` connector
-behaviors to this agent. Server arguments follow `--`.
+model option IDs, Gemini 3 Flash IDs, Gemini 3.1 Pro High, and Claude Sonnet
+4.6 Thinking to Devin catalog UIDs, then translates selections back to
+Antigravity; unmatched IDs remain unchanged and are omitted by the
+catalog-backed picker. Desktop owns picker sorting, pricing, and promo metadata;
+ACP options cannot override those fields. Desktop may apply other `devin*`
+connector behaviors to this agent. Server arguments follow `--`.
 
 The shim identifies itself in-band as `Antigravity (DBA)`, appending a
 `+devin-shim` version suffix to the upstream version. A `/devin-shim` command is

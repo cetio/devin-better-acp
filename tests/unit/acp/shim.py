@@ -831,6 +831,9 @@ class ShimTests(unittest.TestCase):
                         {"value": "gemini-3.6-flash-low", "name": "Gemini 3.6 Flash Low"},
                         {"value": "gemini-3-flash-high", "name": "Gemini 3 Flash High"},
                         {"value": "claude-opus-4.6-thinking", "name": "Claude Opus 4.6 Thinking"},
+                        {"value": "gemini-pro-agent", "name": "Gemini 3.1 Pro High"},
+                        {"value": "gemini-3.1-pro-low", "name": "Gemini 3.1 Pro Low"},
+                        {"value": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6"},
                         {"value": "gpt-oss-120b", "name": "GPT OSS 120B"},
                     ],
                 }],
@@ -843,6 +846,9 @@ class ShimTests(unittest.TestCase):
             "gemini-3-6-flash-low",
             "MODEL_GOOGLE_GEMINI_3_0_FLASH_HIGH",
             "claude-opus-4-6-thinking",
+            "gemini-3-1-pro-high",
+            "gemini-3-1-pro-low",
+            "claude-sonnet-4-6-thinking",
             "gpt-oss-120b",
         ])
 
@@ -867,6 +873,25 @@ class ShimTests(unittest.TestCase):
         })
         flash_forwarded = json.loads(bridge.from_client(flash_request))
         self.assertEqual(flash_forwarded["params"]["value"], "gemini-3-flash-high")
+
+        for model_uid, provider_value in (
+            ("gemini-3-1-pro-high", "gemini-pro-agent"),
+            ("gemini-3-1-pro-low", "gemini-3.1-pro-low"),
+            ("claude-sonnet-4-6-thinking", "claude-sonnet-4-6"),
+        ):
+            with self.subTest(model_uid=model_uid):
+                alias_request = self.shim.dump({
+                    "jsonrpc": "2.0",
+                    "id": "switch-alias",
+                    "method": "session/set_config_option",
+                    "params": {
+                        "sessionId": "fixture",
+                        "configId": "model",
+                        "value": model_uid,
+                    },
+                })
+                alias_forwarded = json.loads(bridge.from_client(alias_request))
+                self.assertEqual(alias_forwarded["params"]["value"], provider_value)
 
     def test_devin_picker_remaps_model_option_updates(self):
         bridge = self.shim.Bridge(Path(sys.executable), [], False)
