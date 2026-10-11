@@ -13,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 SHIM = ROOT / "bin/antigravity-acp.py"
+INTEGRATION = ROOT / "bin/devin-better-integration.py"
 FIXTURE = """
 import json
 import os
@@ -140,6 +141,9 @@ class ShimTests(unittest.TestCase):
         specification = importlib.util.spec_from_file_location("antigravity_shim", SHIM)
         cls.shim = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(cls.shim)
+        integration_specification = importlib.util.spec_from_file_location("devin_better_integration", INTEGRATION)
+        cls.integration = importlib.util.module_from_spec(integration_specification)
+        integration_specification.loader.exec_module(cls.integration)
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="acp shim ")
@@ -195,6 +199,142 @@ class ShimTests(unittest.TestCase):
         probe.send(self.session_new(workspace, [client_server]))
         servers = probe.receive()["result"]["request"]["params"]["mcpServers"]
         self.assertEqual(servers.count(client_server), 1)
+
+    def test_integration_mcp_server_requires_form_elicitation_capability(self):
+        bridge = self.shim.Bridge(Path(sys.executable), [], False)
+        request = self.session_new(Path(self.directory.name))
+        forwarded = bridge.from_client(self.shim.dump(request))
+        self.assertEqual(json.loads(forwarded)["params"], request["params"])
+        self.assertIsNone(bridge.integration_server)
+
+        initialize = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"clientCapabilities": {"elicitation": {"form": {}}}},
+        }
+        bridge.from_client(self.shim.dump(initialize))
+        request["id"] = 2
+        forwarded = json.loads(bridge.from_client(self.shim.dump(request)))
+        servers = forwarded["params"]["mcpServers"]
+        entry = next(server for server in servers if server["name"] == "devin-better-integration")
+        environment = {item["name"]: item["value"] for item in entry["env"]}
+        self.assertEqual(entry["args"], [str(INTEGRATION), "serve"])
+        self.assertTrue(Path(environment["DBA_INTEGRATION_SOCKET"]).exists())
+        self.assertEqual(len(environment["DBA_INTEGRATION_TOKEN"]), 43)
+        bridge.from_agent(self.shim.dump({
+            "jsonrpc": "2.0", "id": 2, "result": {"sessionId": "fixture-session"},
+        }))
+        self.assertEqual(bridge.integration_sessions[environment["DBA_INTEGRATION_TOKEN"]], "fixture-session")
+        bridge.stop_integration_server()
+
+    def test_integration_mcp_server_respects_client_name_conflicts(self):
+        bridge = self.shim.Bridge(Path(sys.executable), [], False)
+        bridge.form_elicitation = True
+        request = self.session_new(Path(self.directory.name), [{
+            "name": "devin-better-integration", "command": "client-owned",
+        }])
+        request["id"] = 3
+        forwarded = bridge.from_client(self.shim.dump(request))
+        self.assertEqual(json.loads(forwarded)["params"], request["params"])
+        self.assertIsNone(bridge.integration_server)
+
+    def test_integration_mcp_stdio_lists_question_tool(self):
+        messages = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        ]
+        completed = subprocess.run(
+            [sys.executable, str(INTEGRATION), "serve"],
+            input=b"".join(json.dumps(message).encode() + b"\n" for message in messages),
+            capture_output=True,
+            check=True,
+        )
+        responses = [json.loads(line) for line in completed.stdout.splitlines()]
+        self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "devin-better-integration")
+        self.assertEqual([tool["name"] for tool in responses[1]["result"]["tools"]], ["ask_user_question"])
+
+    def test_integration_question_round_trips_through_acp_elicitation(self):
+        bridge = self.shim.Bridge(Path(sys.executable), [], False)
+        self.addCleanup(bridge.stop_integration_server)
+        outbound = queue.Queue()
+        bridge.send_client = outbound.put
+        bridge.from_client(self.shim.dump({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"clientCapabilities": {"elicitation": {"form": {}}}},
+        }))
+        new_session = self.session_new(Path(self.directory.name))
+        new_session["id"] = 2
+        request = json.loads(bridge.from_client(self.shim.dump(new_session)))
+        entry = next(server for server in request["params"]["mcpServers"]
+                     if server["name"] == "devin-better-integration")
+        environment = {item["name"]: item["value"] for item in entry["env"]}
+        bridge.from_agent(self.shim.dump({
+            "jsonrpc": "2.0", "id": 2, "result": {"sessionId": "fixture-session"},
+        }))
+        arguments = {"questions": [
+            {
+                "header": "Approach",
+                "question": "Which approach should I use?",
+                "options": [
+                    {"label": "Simple", "description": "Keep the change small."},
+                    {"label": "Broad", "description": "Make a wider improvement."},
+                ],
+            },
+            {
+                "header": "Targets",
+                "question": "Which targets matter?",
+                "options": [{"label": "Tests"}, {"label": "Docs"}],
+                "multi_select": True,
+            },
+        ]}
+        result_queue = queue.Queue()
+        integration_bridge = self.integration.IntegrationBridge(
+            environment["DBA_INTEGRATION_SOCKET"], environment["DBA_INTEGRATION_TOKEN"],
+        )
+
+        def call_integration_tool():
+            result_queue.put(self.integration.handle_message({
+                "jsonrpc": "2.0",
+                "id": "question-call",
+                "method": "tools/call",
+                "params": {"name": "ask_user_question", "arguments": arguments},
+            }, integration_bridge))
+
+        worker = threading.Thread(target=call_integration_tool, daemon=True)
+        worker.start()
+        elicitation = json.loads(outbound.get(timeout=3))
+        self.assertEqual(elicitation["method"], "elicitation/create")
+        self.assertEqual(elicitation["params"]["sessionId"], "fixture-session")
+        self.assertEqual(elicitation["params"]["mode"], "form")
+        self.assertEqual(elicitation["params"]["requestedSchema"]["properties"]["question_1"]["enum"], [
+            "Simple", "Broad", "Other",
+        ])
+        self.assertIsNone(bridge.from_client(self.shim.dump({
+            "jsonrpc": "2.0",
+            "id": elicitation["id"],
+            "result": {
+                "action": "accept",
+                "content": {
+                    "question_1": "Other",
+                    "question_1_other": "Keep the current behavior",
+                    "question_2_option_1": True,
+                    "question_2_option_2": False,
+                    "question_2_other": True,
+                    "question_2_other_text": "Accessibility",
+                },
+            },
+        })))
+        result = result_queue.get(timeout=3)
+        self.assertEqual(result["id"], "question-call")
+        self.assertEqual(json.loads(result["result"]["content"][0]["text"]), {"answers": [
+            {"question": "Which approach should I use?", "answer": "Keep the current behavior"},
+            {"question": "Which targets matter?", "answer": ["Tests", "Accessibility"]},
+        ]})
+        worker.join(timeout=3)
 
     def test_devin_config_prefers_mcp_config_over_legacy_config_json(self):
         probe = self.probe(extra_args=["--devin-config"])

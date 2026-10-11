@@ -28,7 +28,9 @@ home_dir=${HOME:?HOME must be set}
 python=${PYTHON:-python3}
 root_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source_shim="$root_dir/bin/antigravity-acp.py"
+source_integration="$root_dir/bin/devin-better-integration.py"
 install_shim=${DEVIN_BETTER_ACP_SHIM_PATH:-"$home_dir/.local/bin/devin-antigravity-acp.py"}
+install_integration="$(dirname -- "$install_shim")/devin-better-integration.py"
 server_path=${AGY_ACP_SERVER_PATH:-"$home_dir/.local/opt/agy-acp/current/agy_acp_server.par"}
 registry_path=${DEVIN_ACP_REGISTRY_PATH:-"$home_dir/.windsurf/acp/registry.json"}
 
@@ -38,6 +40,10 @@ if ! command -v "$python" >/dev/null 2>&1; then
 fi
 if [[ ! -f "$source_shim" ]]; then
     printf 'Shim source not found: %s\n' "$source_shim" >&2
+    exit 1
+fi
+if [[ ! -f "$source_integration" ]]; then
+    printf 'Integration source not found: %s\n' "$source_integration" >&2
     exit 1
 fi
 if [[ ! -f "$server_path" ]]; then
@@ -93,16 +99,20 @@ PY
 )
 
 if (( dry_run )); then
-    printf 'Dry run; no files changed.\nShim: %s\nRegistry: %s\n' "$install_shim" "$registry_path"
+    printf 'Dry run; no files changed.\nShim: %s\nIntegration: %s\nRegistry: %s\n' \
+        "$install_shim" "$install_integration" "$registry_path"
     printf '%s\n' "$registry_json"
     exit 0
 fi
 
 mkdir -p -- "$(dirname -- "$install_shim")" "$(dirname -- "$registry_path")"
+integration_tmp=$(mktemp "${install_integration}.XXXXXX")
 shim_tmp=$(mktemp "${install_shim}.XXXXXX")
-trap 'rm -f -- "$shim_tmp"' EXIT
+trap 'rm -f -- "$integration_tmp" "$shim_tmp"' EXIT
+cp -- "$source_integration" "$integration_tmp"
 cp -- "$source_shim" "$shim_tmp"
-chmod 755 "$shim_tmp"
+chmod 755 "$integration_tmp" "$shim_tmp"
+mv -f -- "$integration_tmp" "$install_integration"
 mv -f -- "$shim_tmp" "$install_shim"
 
 "$python" - "$registry_path" "$registry_json" <<'PY'

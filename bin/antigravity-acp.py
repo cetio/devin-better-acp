@@ -5,9 +5,12 @@ import json
 import os
 import platform
 import re
+import secrets
 import signal
+import socketserver
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -22,6 +25,9 @@ MAX_FRAME_BYTES = 16 * 1024 * 1024
 KILL_GRACE_SECONDS = 2
 LOG_LINE_BYTES = 256 * 1024
 MAX_READ_PROGRESS = 128
+MAX_INTEGRATION_FRAME_BYTES = 1024 * 1024
+INTEGRATION_NAME = "devin-better-integration"
+INTEGRATION_TIMEOUT_SECONDS = 600
 SHIM_COMMAND = "devin-shim"
 AGENT_TITLE = "Antigravity (DBA)"
 
@@ -171,6 +177,57 @@ def merge_mcp_servers(parameters: dict) -> list[str]:
         return []
     parameters["mcpServers"] = [*(current if isinstance(current, list) else []), *added]
     return [server["name"] for server in added]
+
+
+def is_integration_server(server: object, script: Path) -> bool:
+    if not isinstance(server, dict) or server.get("name") != INTEGRATION_NAME:
+        return False
+    arguments = server.get("args")
+    environment = server.get("env")
+    return (
+        isinstance(arguments, list)
+        and str(script) in arguments
+        and "serve" in arguments
+        and isinstance(environment, list)
+        and any(
+            isinstance(item, dict) and item.get("name") == "DBA_INTEGRATION_TOKEN"
+            for item in environment
+        )
+    )
+
+
+def integration_mcp_server(socket_path: Path, token: str, script: Path) -> dict:
+    return {
+        "name": INTEGRATION_NAME,
+        "command": str(Path(sys.executable).absolute()),
+        "args": [str(script), "serve"],
+        "env": [
+            {"name": "DBA_INTEGRATION_SOCKET", "value": str(socket_path)},
+            {"name": "DBA_INTEGRATION_TOKEN", "value": token},
+        ],
+    }
+
+
+def install_integration_server(parameters: dict, socket_path: Path, token: str, script: Path) -> bool:
+    current = parameters.get("mcpServers")
+    servers = list(current) if isinstance(current, list) else []
+    matches = [
+        index for index, server in enumerate(servers)
+        if isinstance(server, dict) and server.get("name") == INTEGRATION_NAME
+    ]
+    if matches and any(not is_integration_server(servers[index], script) for index in matches):
+        return False
+    entry = integration_mcp_server(socket_path, token, script)
+    if matches:
+        servers[matches[0]] = entry
+        servers = [
+            server for index, server in enumerate(servers)
+            if index == matches[0] or not isinstance(server, dict) or server.get("name") != INTEGRATION_NAME
+        ]
+    else:
+        servers.append(entry)
+    parameters["mcpServers"] = servers
+    return True
 
 
 INFERENCE_NAMES = {
@@ -401,6 +458,30 @@ def remap_model_option_values(config_option: dict) -> tuple[dict[str, str], bool
     return ret, changed
 
 
+class IntegrationRequestHandler(socketserver.StreamRequestHandler):
+    def handle(self) -> None:
+        frame = self.rfile.readline(MAX_INTEGRATION_FRAME_BYTES + 1)
+        if len(frame) > MAX_INTEGRATION_FRAME_BYTES or not frame.endswith(b"\n"):
+            response = {"error": "Invalid local integration request"}
+        else:
+            try:
+                request = json.loads(frame)
+            except (ValueError, UnicodeError, RecursionError):
+                request = None
+            response = self.server.bridge.handle_integration_request(request)
+        self.wfile.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode() + b"\n")
+        self.wfile.flush()
+
+
+class IntegrationSocketServer(socketserver.ThreadingUnixStreamServer):
+    daemon_threads = True
+    block_on_close = False
+
+    def __init__(self, socket_path: str, bridge: object):
+        self.bridge = bridge
+        super().__init__(socket_path, IntegrationRequestHandler)
+
+
 class Bridge:
     def __init__(
         self,
@@ -430,6 +511,16 @@ class Bridge:
         self.read_calls: dict[tuple[str, str], dict] = {}
         self.tool_kinds: dict[str, str] = {}
         self.titled_sessions: set[str] = set()
+        self.form_elicitation = False
+        self.integration_script = Path(__file__).resolve().with_name("devin-better-integration.py")
+        self.integration_directory: tempfile.TemporaryDirectory | None = None
+        self.integration_server: IntegrationSocketServer | None = None
+        self.integration_thread: threading.Thread | None = None
+        self.integration_socket_path: Path | None = None
+        self.pending_integrations: dict[int | str, tuple[str, str | None]] = {}
+        self.integration_sessions: dict[str, str] = {}
+        self.session_integration_tokens: dict[str, str] = {}
+        self.elicitation_requests: dict[str, dict] = {}
         self.frames_up = 0
         self.frames_down = 0
         self.started = time.monotonic()
@@ -478,6 +569,136 @@ class Bridge:
                     self.client_out.flush()
                 except (OSError, ValueError):
                     pass
+
+    def start_integration_server(self) -> Path:
+        if self.integration_server is not None and self.integration_socket_path is not None:
+            return self.integration_socket_path
+        if not hasattr(socketserver, "ThreadingUnixStreamServer"):
+            raise OSError("Unix domain sockets are unavailable")
+        directory = tempfile.TemporaryDirectory(prefix="dba-")
+        socket_path = Path(directory.name) / "i.sock"
+        try:
+            server = IntegrationSocketServer(str(socket_path), self)
+            os.chmod(socket_path, 0o600)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+        except BaseException:
+            directory.cleanup()
+            raise
+        self.integration_directory = directory
+        self.integration_socket_path = socket_path
+        self.integration_server = server
+        self.integration_thread = thread
+        return socket_path
+
+    def stop_integration_server(self) -> None:
+        server = self.integration_server
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if self.integration_thread is not None:
+            self.integration_thread.join(timeout=2)
+        if self.integration_directory is not None:
+            self.integration_directory.cleanup()
+        self.integration_server = None
+        self.integration_thread = None
+        self.integration_socket_path = None
+        self.integration_directory = None
+
+    def handle_integration_request(self, request: object) -> dict:
+        if not isinstance(request, dict):
+            return {"error": "Invalid local integration request"}
+        token = request.get("token")
+        operation = request.get("operation")
+        parameters = request.get("params")
+        with self.lock:
+            session_id = self.integration_sessions.get(token) if isinstance(token, str) else None
+        if not isinstance(session_id, str):
+            return {"error": "The local integration session is no longer active"}
+        if operation != "elicitation/create" or not isinstance(parameters, dict):
+            return {"error": "Unsupported local integration operation"}
+        parameters = dict(parameters)
+        if parameters.get("mode") != "form" or not isinstance(parameters.get("message"), str):
+            return {"error": "Invalid form elicitation request"}
+        if not isinstance(parameters.get("requestedSchema"), dict):
+            return {"error": "Invalid form elicitation schema"}
+        if "sessionId" in parameters and parameters["sessionId"] != session_id:
+            return {"error": "The local integration session does not match"}
+        parameters["sessionId"] = session_id
+        try:
+            return {"result": self.create_elicitation(session_id, parameters)}
+        except (TimeoutError, OSError) as error:
+            return {"error": str(error) or "The client interaction failed"}
+
+    def create_elicitation(self, session_id: str, parameters: dict) -> dict:
+        request_id = f"dba-integration-{secrets.token_urlsafe(18)}"
+        pending = {"event": threading.Event(), "response": None}
+        with self.lock:
+            self.elicitation_requests[request_id] = pending
+        request = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "elicitation/create",
+            "params": parameters,
+        }
+        self.log("shim", {"event": "integration_elicitation", "sessionId": session_id, "requestId": request_id})
+        self.send_client(dump(request))
+        try:
+            if not pending["event"].wait(INTEGRATION_TIMEOUT_SECONDS):
+                raise TimeoutError("The client did not answer the question in time")
+            response = pending["response"]
+            if not isinstance(response, dict):
+                raise OSError("The client returned an invalid question response")
+            if "error" in response:
+                raise OSError("The client could not display the question")
+            result = response.get("result")
+            if not isinstance(result, dict):
+                raise OSError("The client returned an invalid question response")
+            return result
+        finally:
+            with self.lock:
+                self.elicitation_requests.pop(request_id, None)
+
+    def complete_elicitation(self, message: dict) -> bool:
+        request_id = message.get("id")
+        with self.lock:
+            pending = self.elicitation_requests.get(request_id)
+            if pending is None:
+                return False
+            pending["response"] = message
+            pending["event"].set()
+        result = message.get("result")
+        action = result.get("action") if isinstance(result, dict) else None
+        self.log("shim", {"event": "integration_elicitation_answered", "action": action})
+        return True
+
+    def attach_integration_server(self, parameters: dict, request_id: object) -> bool:
+        if (
+            not self.form_elicitation
+            or not isinstance(request_id, (str, int))
+            or not self.integration_script.is_file()
+        ):
+            return False
+        current = parameters.get("mcpServers")
+        if isinstance(current, list) and any(
+            isinstance(server, dict)
+            and server.get("name") == INTEGRATION_NAME
+            and not is_integration_server(server, self.integration_script)
+            for server in current
+        ):
+            return False
+        try:
+            socket_path = self.start_integration_server()
+        except OSError:
+            self.log("shim", {"event": "integration_server_unavailable"})
+            return False
+        token = secrets.token_urlsafe(32)
+        if not install_integration_server(parameters, socket_path, token, self.integration_script):
+            return False
+        session_id = parameters.get("sessionId")
+        with self.lock:
+            self.pending_integrations[request_id] = (token, session_id if isinstance(session_id, str) else None)
+        return True
 
     def status_text(self) -> str:
         process = self.process
@@ -658,7 +879,14 @@ class Bridge:
     def from_client(self, frame: bytes) -> bytes | None:
         message = decode_frame(frame)
         self.frames_up += 1
+        if "method" not in message and self.complete_elicitation(message):
+            return None
         self.log("c2a", message)
+        if message.get("method") == "initialize":
+            parameters = message.get("params")
+            capabilities = parameters.get("clientCapabilities") if isinstance(parameters, dict) else None
+            elicitation = capabilities.get("elicitation") if isinstance(capabilities, dict) else None
+            self.form_elicitation = isinstance(elicitation, dict) and isinstance(elicitation.get("form"), dict)
         if "method" not in message:
             self.track_read_progress(message)
         if message.get("method") == "session/prompt":
@@ -701,13 +929,16 @@ class Bridge:
             info.setdefault("version", VERSION)
             parameters["clientInfo"] = info
             return dump(message)
+        request_modified = False
         if self.devin_config and message.get("method") in ("session/new", "session/load"):
             if isinstance(parameters, dict):
                 added = merge_mcp_servers(parameters)
                 if added:
                     self.log("shim", {"event": "devin_mcp_merge", "added": added})
-                    return dump(message)
-        return dump(message) if model_value_changed else frame
+                    request_modified = True
+        if message.get("method") in ("session/new", "session/load") and isinstance(parameters, dict):
+            request_modified = self.attach_integration_server(parameters, message.get("id")) or request_modified
+        return dump(message) if model_value_changed or request_modified else frame
 
     def from_agent(self, frame: bytes) -> bytes | None:
         message = decode_frame(frame)
@@ -719,8 +950,23 @@ class Bridge:
                 method = self.pending.pop(request_id, None)
                 request_session_id = self.pending_sessions.pop(request_id, None)
                 session_id = self.prompt_sessions.pop(request_id, None)
+                integration = self.pending_integrations.pop(request_id, None)
                 cancelled = request_id in self.cancelled_prompts
                 self.cancelled_prompts.discard(request_id)
+                if integration is not None:
+                    token, expected_session_id = integration
+                    result = message.get("result")
+                    resolved_session_id = result.get("sessionId") if isinstance(result, dict) else None
+                    if not isinstance(resolved_session_id, str):
+                        resolved_session_id = expected_session_id
+                    if isinstance(resolved_session_id, str) and "error" not in message:
+                        previous_token = self.session_integration_tokens.get(resolved_session_id)
+                        if previous_token is not None:
+                            self.integration_sessions.pop(previous_token, None)
+                        self.integration_sessions[token] = resolved_session_id
+                        self.session_integration_tokens[resolved_session_id] = token
+                    else:
+                        self.integration_sessions.pop(token, None)
                 if method == "session/prompt" and session_id not in self.prompt_sessions.values():
                     for key in list(self.read_calls):
                         if key[0] == session_id:
@@ -915,6 +1161,7 @@ class Bridge:
             code = process.poll()
         finally:
             stop_child(process)
+            self.stop_integration_server()
             agent.join(timeout=KILL_GRACE_SECONDS)
             stderr.join(timeout=KILL_GRACE_SECONDS)
             self.log("sys", {"event": "exit", "code": process.poll()})

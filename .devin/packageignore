@@ -1,0 +1,13 @@
+.devin/**
+AGENTS.md
+.gitignore
+tsconfig.json
+package-lock.json
+source/**
+tests/**
+dist/tests/**
+bin/**
+!bin/antigravity-acp.py
+!bin/devin-better-integration.py
+node_modules/**
+*.vsix

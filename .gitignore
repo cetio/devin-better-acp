@@ -3,4 +3,7 @@ dist/
 *.vsix
 .vscode-test/
 .devin
+!.devin/
+.devin/*
+!.devin/packageignore
 __pycache__
