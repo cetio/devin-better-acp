@@ -14,6 +14,12 @@ DEVIN-SYSTEM-PROMPT.md
 tests/**
 dist/tests/**
 dist/source/monitor.js
+dist/source/adapter.js
+dist/source/registry.js
+dist/source/settings.js
+dist/source/envelope.js
+dist/source/allowance/**
+dist/source/process/**
 dist/source/picker/**
 dist/source/status/**
 bin/**

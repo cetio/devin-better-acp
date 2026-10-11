@@ -2,7 +2,7 @@ import * as assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import * as vscode from "vscode";
 
-import { ConnectionState } from "../../source/allowance/model";
+import { ConnectionState } from "../../source/usage";
 import type { ExtensionApi } from "../../source/extension";
 
 const COMMANDS = [
@@ -35,8 +35,6 @@ export async function run(): Promise<void>
     assert.ok(codex !== undefined && antigravity !== undefined);
     assert.deepEqual(codex.snapshot?.pools.map((pool) => pool.id), ["codex"]);
     assert.deepEqual(antigravity.snapshot?.pools.map((pool) => pool.id), ["gemini", "other"]);
-    assert.equal(codex.cliVersion, "0.160.0");
-    assert.equal(antigravity.cliVersion, "1.2.16");
     assert.ok((codex.snapshot?.pools[0]?.windows.length ?? 0) >= 2);
 
     const resultFile = process.env.DEVIN_BETTER_ACP_RESULT_FILE;

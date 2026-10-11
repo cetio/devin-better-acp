@@ -1,36 +1,55 @@
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 
-import { ConnectionState } from "../../../source/allowance/model";
-import { createAntigravityAdapter, parseUsageReport } from "../../../source/antigravity/usage";
-import { AdapterError, ProviderInvocation } from "../../../source/adapter";
-import { PROVIDER_SPECS } from "../../../source/registry";
+import { antigravityCLI } from "../../../source/antigravity/cli";
+import type { AntigravityConfig } from "../../../source/antigravity/config";
+import { parseUsageReport } from "../../../source/antigravity/usage";
+import type { CliContext } from "../../../source/cli";
+import { ConnectionState, UsageError } from "../../../source/usage";
 import { agyScript, agyUsageReport, tempDir, writeScript } from "../../support";
 
-const OBSERVED_AT = 1790000000000;
-
-function invocation(script: string, directory: string, timeoutMs = 5000): ProviderInvocation
+function config(script: string): AntigravityConfig
 {
     return {
-        command: script,
-        readArgs: [],
-        versionArgs: ["version"],
-        cwd: directory,
-        timeoutMs,
-        versionTimeoutMs: 5000,
+        id: "antigravity",
+        label: "Antigravity",
+        enabled: true,
+        path: script,
+        visible: true,
+        spoofZed: true,
+        devinMcp: true,
+        systemPrompt: true,
+        cli: antigravityCLI,
     };
 }
 
-test("antigravity usage maps Gemini and other-model pools separately", () =>
+function cliContext(directory: string): CliContext
 {
-    const result = parseUsageReport(agyUsageReport(), OBSERVED_AT);
+    return {
+        workingDirectory: directory,
+        workspacePaths: [],
+        environment: { PATH: "" },
+        home: directory,
+        clientVersion: "0.1.0",
+    };
+}
 
+function removeDirectory(path: string): void
+{
+    rmSync(path, { recursive: true, force: true });
+}
+
+test("Antigravity usage maps Gemini and Other pools without retaining unused descriptions", () =>
+{
+    const result = parseUsageReport(agyUsageReport());
+
+    assert.equal(result.partial, false);
     assert.deepEqual(result.pools.map((pool) => pool.id), ["gemini", "other"]);
     const gemini = result.pools[0];
     assert.ok(gemini !== undefined);
     assert.equal(gemini.label, "Gemini Models");
-    assert.equal(gemini.description, "Models within this group: Gemini Flash, Gemini Pro");
     assert.deepEqual(gemini.windows.map((window) => window.id), ["gemini-5h", "gemini-weekly"]);
     assert.equal(gemini.windows[0]?.label, "5h");
     assert.equal(gemini.windows[0]?.durationMinutes, 300);
@@ -47,34 +66,42 @@ test("antigravity usage maps Gemini and other-model pools separately", () =>
     assert.equal(other.windows[1]?.usedPercent, 0);
 });
 
-test("antigravity refuses a usage report that consumed model tokens", () =>
+test("positive token counters stop polling before status or command parsing", () =>
 {
-    assert.throws(() => parseUsageReport(agyUsageReport({ totalTokens: 12 }), OBSERVED_AT), (error: unknown) =>
-        error instanceof AdapterError && error.state === ConnectionState.Unsupported);
+    const tokenKeys = ["input_tokens", "output_tokens", "thinking_tokens", "cache_read_tokens", "total_tokens"];
+    for (const key of tokenKeys)
+    {
+        const payload = { status: "ERROR", error: "PRIVATE", usage: { [key]: 1 } };
+        assert.throws(() => parseUsageReport(payload), (error: unknown) =>
+            error instanceof UsageError && error.state === ConnectionState.Unsupported
+                && error.stopPolling && !error.message.includes("PRIVATE"));
+    }
 });
 
-test("antigravity requires the structured usage command envelope", () =>
+test("Antigravity requires the structured usage command envelope", () =>
 {
-    assert.throws(() => parseUsageReport(agyUsageReport({ includeCommand: false }), OBSERVED_AT), (error: unknown) =>
-        error instanceof AdapterError && error.state === ConnectionState.Unsupported);
+    assert.throws(() => parseUsageReport(agyUsageReport({ includeCommand: false })), (error: unknown) =>
+        error instanceof UsageError && error.state === ConnectionState.Unsupported);
     const wrongCommand = { status: "SUCCESS", command: { name: "model" } };
-    assert.throws(() => parseUsageReport(wrongCommand, OBSERVED_AT), (error: unknown) =>
-        error instanceof AdapterError && error.state === ConnectionState.Unsupported);
-    assert.throws(() => parseUsageReport(agyUsageReport({ groups: [] }), OBSERVED_AT), (error: unknown) =>
-        error instanceof AdapterError && error.state === ConnectionState.Unavailable);
+    assert.throws(() => parseUsageReport(wrongCommand), (error: unknown) =>
+        error instanceof UsageError && error.state === ConnectionState.Unsupported);
+    assert.throws(() => parseUsageReport(agyUsageReport({ groups: [] })), (error: unknown) =>
+        error instanceof UsageError && error.state === ConnectionState.Unavailable);
 });
 
-test("antigravity classifies failed usage commands", () =>
+test("Antigravity classifies failed usage commands without surfacing response bodies", () =>
 {
-    const signedOut = { status: "ERROR", error: "authentication required" };
-    assert.throws(() => parseUsageReport(signedOut, OBSERVED_AT), (error: unknown) =>
-        error instanceof AdapterError && error.state === ConnectionState.AuthRequired);
-    const offline = { status: "ERROR", error: "backend unavailable" };
-    assert.throws(() => parseUsageReport(offline, OBSERVED_AT), (error: unknown) =>
-        error instanceof AdapterError && error.state === ConnectionState.Unavailable);
+    const signedOut = { status: "ERROR", error: "authentication required PRIVATE" };
+    assert.throws(() => parseUsageReport(signedOut), (error: unknown) =>
+        error instanceof UsageError && error.state === ConnectionState.AuthRequired
+            && !error.message.includes("PRIVATE"));
+    const offline = { status: "ERROR", error: "backend unavailable PRIVATE" };
+    assert.throws(() => parseUsageReport(offline), (error: unknown) =>
+        error instanceof UsageError && error.state === ConnectionState.Unavailable
+            && !error.message.includes("PRIVATE"));
 });
 
-test("antigravity keeps unknown groups and skips unusable buckets", () =>
+test("Antigravity marks missing pools partial and skips unusable buckets", () =>
 {
     const weekly = {
         id: "preview-weekly",
@@ -83,69 +110,60 @@ test("antigravity keeps unknown groups and skips unusable buckets", () =>
         remaining_fraction: 0.5,
         reset_time: "not a date",
     };
-    const groups = [
-        {
-            name: "Preview Models",
-            buckets: [
-                weekly,
-                { id: "preview-broken", name: "Broken", window: "weekly", remaining_fraction: 1.5 },
-            ],
-        },
-    ];
-    const result = parseUsageReport(agyUsageReport({ groups }), OBSERVED_AT);
+    const groups = [{
+        name: "Preview Models",
+        buckets: [weekly, { id: "preview-broken", name: "Broken", window: "weekly", remaining_fraction: 1.5 }],
+    }];
+    const result = parseUsageReport(agyUsageReport({ groups }));
 
+    assert.equal(result.partial, true);
     assert.deepEqual(result.pools.map((pool) => pool.id), ["preview-models"]);
     assert.equal(result.pools[0]?.windows.length, 1);
     assert.equal(result.pools[0]?.windows[0]?.usedPercent, 50);
     assert.equal(result.pools[0]?.windows[0]?.resetsAt, undefined);
 });
 
-test("the antigravity adapter reads a successful report end to end", async (context) =>
+test("the Antigravity CLI runs only the standalone slash-usage command", async (context) =>
 {
     const directory = tempDir("devin-better-acp-agy-");
     context.after(() => removeDirectory(directory));
-    const script = writeScript(directory, "agy.cjs", agyScript({}));
-    const adapter = createAntigravityAdapter(invocation(script, directory));
-    const result = await adapter.read(new AbortController().signal);
+    const logPath = join(directory, "arguments.log");
+    const script = writeScript(directory, "agy.cjs", agyScript({ logPath }));
+    const report = await antigravityCLI.readUsage(config(script), cliContext(directory), new AbortController().signal);
 
-    assert.deepEqual(result.pools.map((pool) => pool.id), ["gemini", "other"]);
-    assert.equal(await adapter.version(new AbortController().signal), "1.2.16");
+    assert.deepEqual(report.pools.map((pool) => pool.id), ["gemini", "other"]);
+    assert.deepEqual(readFileSync(logPath, "utf8").trim().split(" "), [
+        "--print", "/usage", "--output-format", "json", "--print-timeout", "20s", "--mode", "plan",
+    ]);
+    assert.equal(readFileSync(logPath, "utf8").includes("--disable-slash-commands"), false);
+    assert.equal(readFileSync(logPath, "utf8").includes("--version"), false);
 });
 
-test("the antigravity adapter classifies process failures", async (context) =>
+test("the Antigravity CLI classifies process and JSON failures safely", async (context) =>
 {
     const directory = tempDir("devin-better-acp-agy-");
     context.after(() => removeDirectory(directory));
-    const signedOutReport = agyScript({ exitCode: 1, stderr: "authentication required\n" });
-    const signedOut = writeScript(directory, "signed-out.cjs", signedOutReport);
-    const signedOutAdapter = createAntigravityAdapter(invocation(signedOut, directory));
-    await assert.rejects(signedOutAdapter.read(new AbortController().signal), (error: unknown) =>
-        error instanceof AdapterError && error.state === ConnectionState.AuthRequired);
+    const signedOut = writeScript(
+        directory,
+        "signed-out.cjs",
+        agyScript({ exitCode: 1, stderr: "authentication required PRIVATE" }),
+    );
+    await assert.rejects(
+        antigravityCLI.readUsage(config(signedOut), cliContext(directory), new AbortController().signal),
+        (error: unknown) => error instanceof UsageError && error.state === ConnectionState.AuthRequired
+            && !error.message.includes("PRIVATE"),
+    );
 
-    const broken = writeScript(directory, "broken.cjs", agyScript({ exitCode: 2, stderr: "boom\n" }));
-    const brokenAdapter = createAntigravityAdapter(invocation(broken, directory));
-    await assert.rejects(brokenAdapter.read(new AbortController().signal), (error: unknown) =>
-        error instanceof AdapterError && error.state === ConnectionState.Unavailable);
+    const broken = writeScript(directory, "broken.cjs", agyScript({ exitCode: 2, stderr: "boom PRIVATE" }));
+    await assert.rejects(
+        antigravityCLI.readUsage(config(broken), cliContext(directory), new AbortController().signal),
+        (error: unknown) => error instanceof UsageError && error.state === ConnectionState.Unavailable
+            && !error.message.includes("PRIVATE"),
+    );
 
     const garbled = writeScript(directory, "garbled.cjs", agyScript({ report: "not json" }));
-    const garbledAdapter = createAntigravityAdapter(invocation(garbled, directory));
-    await assert.rejects(garbledAdapter.read(new AbortController().signal), (error: unknown) =>
-        error instanceof AdapterError && error.state === ConnectionState.Unsupported);
+    await assert.rejects(
+        antigravityCLI.readUsage(config(garbled), cliContext(directory), new AbortController().signal),
+        (error: unknown) => error instanceof UsageError && error.state === ConnectionState.Unsupported,
+    );
 });
-
-test("the provider specs lock the verified CLI invocations", () =>
-{
-    const codex = PROVIDER_SPECS.find((candidate) => candidate.id === "codex");
-    const antigravity = PROVIDER_SPECS.find((candidate) => candidate.id === "antigravity");
-    assert.ok(codex !== undefined && antigravity !== undefined);
-    assert.deepEqual(codex.readArgs, ["app-server", "--stdio"]);
-    const expected = ["--print", "/usage", "--output-format", "json", "--print-timeout", "20s", "--mode", "plan"];
-    assert.deepEqual(antigravity.readArgs, expected);
-    assert.equal(antigravity.readArgs.includes("--disable-slash-commands"), false);
-    assert.equal(antigravity.readArgs.includes("--input-format"), false);
-});
-
-function removeDirectory(path: string): void
-{
-    rmSync(path, { recursive: true, force: true });
-}

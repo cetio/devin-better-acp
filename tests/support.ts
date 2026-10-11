@@ -1,10 +1,4 @@
-import {
-    ConnectionState,
-    ProviderSnapshot,
-    ProviderStatus,
-    UsagePool,
-    UsageWindow,
-} from "../source/allowance/model";
+import { ConnectionState, ProviderSnapshot, ProviderStatus, UsagePool, UsageWindow } from "../source/usage";
 import type { DisplayContext } from "../source/ui/status";
 import type { UsageState } from "../source/usage";
 
@@ -31,6 +25,7 @@ export type CodexFixture = {
     rateLimits: unknown;
     rpcError: { code: number; message: string } | undefined;
     ignoreRequests: boolean;
+    launchLogPath?: string;
 };
 
 export function codexServerScript(fixture: CodexFixture, logPath?: string): string
@@ -40,11 +35,10 @@ const readline = require("node:readline");
 const fs = require("node:fs");
 const fixture = ${JSON.stringify(fixture)};
 const logPath = ${JSON.stringify(logPath ?? "")};
+const launchLogPath = fixture.launchLogPath || "";
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
-
-if (process.argv.includes("version")) {
-    process.stdout.write("codex-cli 0.160.0\\n");
-    process.exit(0);
+if (launchLogPath) {
+    fs.appendFileSync(launchLogPath, process.argv.slice(2).join(" "));
 }
 
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
@@ -88,7 +82,6 @@ export type AgyFixture = {
     report: unknown;
     exitCode: number;
     stderr: string;
-    version: string;
     logPath: string;
 };
 
@@ -98,7 +91,6 @@ export function agyScript(fixture: Partial<AgyFixture>): string
         report: fixture.report ?? agyUsageReport(),
         exitCode: fixture.exitCode ?? 0,
         stderr: fixture.stderr ?? "",
-        version: fixture.version ?? "1.2.16",
         logPath: fixture.logPath ?? "",
     };
     return `
@@ -107,10 +99,6 @@ const fixture = ${JSON.stringify(resolved)};
 
 if (fixture.logPath) {
     fs.appendFileSync(fixture.logPath, process.argv.slice(2).join(" ") + "\\n");
-}
-if (process.argv.includes("version")) {
-    process.stdout.write(fixture.version + "\\n");
-    process.exit(0);
 }
 if (fixture.stderr.length > 0) {
     process.stderr.write(fixture.stderr);
@@ -258,15 +246,14 @@ export function testWindow(
     return { id, label, usedPercent, durationMinutes, resetsAt };
 }
 
-export function testPool(id: string, label: string, windows: UsageWindow[], description?: string): UsagePool
+export function testPool(id: string, label: string, windows: UsageWindow[]): UsagePool
 {
-    return { id, label, description, windows };
+    return { id, label, windows };
 }
 
 export function testSnapshot(usedPercent: number): ProviderSnapshot
 {
     return {
-        observedAt: TEST_NOW,
         pools: [testPool("codex", "Codex", [testWindow("codex:primary", "5h", usedPercent, 300)])],
         metadata: [],
     };
@@ -279,9 +266,7 @@ export function testStatus(changes: Partial<ProviderStatus> = {}): ProviderStatu
         label: "Codex",
         state: ConnectionState.Ready,
         message: undefined,
-        cliVersion: "0.160.0",
         snapshot: {
-            observedAt: TEST_NOW,
             pools: [testPool("codex", "Codex", [
                 testWindow("codex:primary", "5h", 3, 300, TEST_NOW + 4 * 3600000),
                 testWindow("codex:secondary", "Weekly", 16, 10080, TEST_NOW + 6 * 86400000 + 6 * 3600000),
@@ -289,7 +274,6 @@ export function testStatus(changes: Partial<ProviderStatus> = {}): ProviderStatu
             metadata: [{ label: "Plan", value: "plus" }],
         },
         refreshing: false,
-        lastAttemptAt: TEST_NOW,
         lastSuccessAt: TEST_NOW - 100,
         ...changes,
     };
@@ -300,14 +284,12 @@ export function testAntigravityStatus(changes: Partial<ProviderStatus> = {}): Pr
     return testStatus({
         provider: "antigravity",
         label: "Antigravity",
-        cliVersion: "1.2.16",
         snapshot: {
-            observedAt: TEST_NOW,
             pools: [
                 testPool("gemini", "Gemini Models", [
-                    testWindow("gemini-weekly", "weekly", 16, 10080, TEST_NOW + 6 * 86400000 + 6 * 3600000),
                     testWindow("gemini-5h", "5h", 3, 300, TEST_NOW + 4 * 3600000),
-                ], "Models within this group: Gemini Flash, Gemini Pro"),
+                    testWindow("gemini-weekly", "weekly", 16, 10080, TEST_NOW + 6 * 86400000 + 6 * 3600000),
+                ]),
                 testPool("other", "Claude and GPT models", [testWindow("3p-5h", "5h", 0, 300)]),
             ],
             metadata: [],

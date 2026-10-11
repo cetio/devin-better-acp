@@ -82,8 +82,13 @@ test("the install command deploys the Python package and atomically updates the 
     const python = writeScript(
         directory,
         "python.cjs",
-        `if (!process.argv.includes("--system-prompt")) process.exit(3);
-        process.stdout.write(${JSON.stringify(JSON.stringify(registryEntry()))});`,
+        `const entry = ${JSON.stringify(registryEntry())};
+        const pathIndex = process.argv.indexOf("--extension-config");
+        if (pathIndex < 0) process.exit(3);
+        for (const launch of Object.values(entry.distribution.binary)) {
+            launch.args.push("--extension-config", process.argv[pathIndex + 1]);
+        }
+        process.stdout.write(JSON.stringify(entry));`,
     );
 
     const installed = await installAntigravity(
@@ -103,6 +108,7 @@ test("the install command deploys the Python package and atomically updates the 
         shimPath: join(installDirectory, "source", "antigravity", "acp.py"),
         serverPath,
         registryPath,
+        launchConfigPath: join(directory, ".config", "devin", "devin-better-antigravity.json"),
     });
     assert.equal(
         readFileSync(join(installedRoot, "__init__.py"), "utf8"),
@@ -140,7 +146,13 @@ test("the install command deploys the Python package and atomically updates the 
         agents: Array<{ id: string; distribution?: { binary?: Record<string, { args: string[] }> } }>;
     };
     assert.deepEqual(registry.agents.map((agent) => agent.id), ["before", "devin-better-antigravity", "after"]);
-    assert.equal(registry.agents[1]?.distribution?.binary?.["linux-x86_64"]?.args[0], paths.shimPath);
+    const installedArguments = registry.agents[1]?.distribution?.binary?.["linux-x86_64"]?.args;
+    assert.equal(installedArguments?.[0], paths.shimPath);
+    assert.ok(installedArguments?.includes("--extension-config"));
+    assert.ok(installedArguments?.includes(paths.launchConfigPath));
+    assert.equal(installedArguments?.includes("--spoof-zed"), false);
+    assert.equal(installedArguments?.includes("--devin-config"), false);
+    assert.equal(installedArguments?.includes("--system-prompt"), false);
 });
 
 test("Python failure details are not surfaced to the command", async (context) =>

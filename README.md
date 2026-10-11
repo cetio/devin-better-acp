@@ -14,7 +14,7 @@ Devin-style Antigravity ACP.
 | --- | --- |
 | Devin Desktop | 1.90 or newer on Linux, or a VS Code-compatible host |
 | `codex` | Signed in with a ChatGPT plan (`codex login`) |
-| `agy` | Signed in (`agy`), version 1.2.16 or newer |
+| `agy` | Signed in (`agy`) |
 
 Both CLIs are resolved from `PATH`, `~/.local/bin`, or an explicit absolute path
 in settings. The extension never reads, copies, or refreshes stored credentials.
@@ -58,14 +58,24 @@ visibility settings both work.
 | `devinBetterACP.codex.path` | empty | Absolute path to `codex` |
 | `devinBetterACP.antigravity.enabled` | `true` | Enable the Antigravity provider |
 | `devinBetterACP.antigravity.path` | empty | Absolute path to `agy` |
-| `devinBetterACP.refreshIntervalSeconds` | `300` | Background refresh interval. `0` refreshes at startup and on request only. |
+| `devinBetterACP.refreshIntervalSeconds` | `180` | Fixed background polling interval, including while unfocused. `0` disables background polling; positive values below 60 seconds are allowed. |
+| `devinBetterACP.antigravity.spoofZed` | `true` | Send the Zed client name to Antigravity for compatibility. |
+| `devinBetterACP.antigravity.devinMcp` | `true` | Merge Devin MCP servers into Antigravity sessions. |
+| `devinBetterACP.antigravity.systemPrompt` | `true` | Use the adapted system prompt in a temporary Antigravity launch copy. |
 | `devinBetterACP.statusBar.alignment` | `right` | Status-bar side |
 | `devinBetterACP.statusBar.showCodex` | `true` | Show the Codex item |
 | `devinBetterACP.statusBar.showAntigravity` | `true` | Show the Antigravity item |
 
-Refreshes pause while the window is unfocused and back off after transient
-failures. Polling stops after a sign-in, missing-CLI, or unsupported result
-until you retry. Monitoring is paused in untrusted workspaces.
+Usage refreshes start when the extension activates, then run on one fixed,
+configurable cadence regardless of window focus. Ordinary failures retry on the
+next interval while the last successful values remain marked stale. If the
+Antigravity probe reports model-token consumption, its polling stops until you
+explicitly reconnect. Usage monitoring is paused in untrusted workspaces.
+
+Antigravity shim settings are synchronized to an extension-owned file under
+`~/.config/devin/`. After the one-time confirmed install/update, setting changes
+apply to new ACP launches after running `Devin: Reload ACP Connections`. The
+snapshot is shared by installed connectors in the same user home.
 
 ## Commands
 
@@ -73,7 +83,7 @@ until you retry. Monitoring is paused in untrusted workspaces.
 | --- | --- |
 | `Devin Better ACP: Show Usage` | Open the details and actions menu |
 | `Devin Better ACP: Refresh All` | Refresh both providers now |
-| `Devin Better ACP: Retry Connection` | Retry a provider, including the CLI version check |
+| `Devin Better ACP: Retry Connection` | Explicitly retry a provider, including resuming a token-safety stop |
 | `Devin Better ACP: Configure CLI Path` | Pick the CLI executable and store its absolute path |
 | `Devin Better ACP: Open Settings` | Open the extension settings |
 | `Devin Better ACP: Open ChatGPT Usage Page` | Open the account usage page for Codex |
@@ -82,8 +92,9 @@ until you retry. Monitoring is paused in untrusted workspaces.
 The installer confirms before writing, copies the shim to `~/.local/lib/devin-better-acp`,
 and merges the agent into `~/.windsurf/acp/registry.json`. The default Antigravity
 ACP server path is `~/.local/opt/agy-acp/current/agy_acp_server.par`; existing
-matching entries are replaced and unrelated entries are preserved. Restart
-Devin Desktop after installation. `DEVIN_BETTER_ACP_INSTALL_DIR`,
+matching entries are replaced and unrelated entries are preserved. Run
+`Devin: Reload ACP Connections` after installation to load the new entry.
+`DEVIN_BETTER_ACP_INSTALL_DIR`,
 `AGY_ACP_SERVER_PATH`, `DEVIN_ACP_REGISTRY_PATH`, and `PYTHON` override defaults.
 
 ## How It Works
@@ -94,9 +105,8 @@ Devin Desktop after installation. `DEVIN_BETTER_ACP_INSTALL_DIR`,
 | Antigravity | `agy --print /usage --output-format json --print-timeout 20s --mode plan` | agy 1.2.16 |
 
 The Codex connection only performs those read requests and never starts a
-thread or a turn. The Antigravity invocation is a standalone slash command that
-reports zero model tokens, and polling stops if a future CLI version reports
-otherwise.
+thread or a turn. The Antigravity invocation is a standalone slash command that is expected to
+report zero model tokens. Polling stops if any usage counter is positive.
 
 ## Development
 

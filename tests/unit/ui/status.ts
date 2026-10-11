@@ -1,4 +1,4 @@
-import { ConnectionState } from "../../../source/allowance/model";
+import { ConnectionState } from "../../../source/usage";
 import {
     testAntigravityStatus,
     testPool,
@@ -6,7 +6,6 @@ import {
     testStatus,
     testWindow,
     TEST_CONTEXT,
-    TEST_NOW,
 } from "../../support";
 import type { UsageState } from "../../../source/usage";
 
@@ -203,7 +202,6 @@ test("provider text is escaped inside hover markdown", () =>
 {
     const hostile = testStatus({
         snapshot: {
-            observedAt: TEST_NOW,
             pools: [testPool("codex", "Codex", [testWindow("codex:primary", "5h | `x` $(zap)", 12, 300)])],
             metadata: [{ label: "Plan | tier", value: "**plus**" }],
         },

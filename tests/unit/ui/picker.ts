@@ -1,4 +1,5 @@
-import { ConnectionState, ProviderId, ProviderStatus } from "../../../source/allowance/model";
+import { ConnectionState } from "../../../source/usage";
+import type { ProviderId, ProviderStatus } from "../../../source/usage";
 import {
     testAntigravityStatus,
     testPool,
@@ -6,7 +7,6 @@ import {
     testUsageState,
     testWindow,
     TEST_CONTEXT,
-    TEST_NOW,
 } from "../../support";
 import type { PickAction, PickItem, PickerCallbacks } from "../../../source/ui/picker";
 
@@ -158,6 +158,30 @@ function windowRows(picker: FakePicker): TestItem[]
     return picker.items.filter((item) => item.id.startsWith("window."));
 }
 
+test("opening the Quick Pick requests the selected provider or the overview", () =>
+{
+    const actions = callbacks();
+    const selected: ProviderId[] = [];
+    let overviewRefreshes = 0;
+    actions.refreshProvider = async (provider) =>
+    {
+        selected.push(provider);
+    };
+    actions.refreshAll = async () =>
+    {
+        overviewRefreshes += 1;
+    };
+    const focusedPicker = new UsagePicker(actions);
+    focusedPicker.show(testUsageState(statuses()), { provider: "antigravity" });
+    assert.deepEqual(selected, ["antigravity"]);
+    focusedPicker.dispose();
+
+    const overviewPicker = new UsagePicker(actions);
+    overviewPicker.show(testUsageState(statuses()));
+    assert.equal(overviewRefreshes, 1);
+    overviewPicker.dispose();
+});
+
 test("usage rows show comparable limits while connection actions stay out of the main menu", () =>
 {
     const items = pickerItems([testStatus()], TEST_CONTEXT);
@@ -181,7 +205,7 @@ test("usage rows show comparable limits while connection actions stay out of the
 
     const updated = items.find((item) => item.id === "updated.codex");
     assert.equal(updated?.description, "just now");
-    assert.equal(updated?.detail, "Codex · CLI 0.160.0");
+    assert.equal(updated?.detail, "Codex");
 });
 
 test("management separates provider connections from general settings", () =>
@@ -289,7 +313,6 @@ test("unknown windows and missing reset times remain readable", () =>
 {
     const current = testStatus({
         snapshot: {
-            observedAt: TEST_NOW,
             pools: [testPool("codex", "Codex", [testWindow("custom", "Burst", 0)])],
             metadata: [],
         },
@@ -304,7 +327,6 @@ test("provider metadata cannot render native icons in the picker", () =>
 {
     const current = testStatus({
         snapshot: {
-            observedAt: TEST_NOW,
             pools: [testPool("codex", "Codex", [testWindow("custom", "$(zap)\nBurst", 0)])],
             metadata: [{ label: "Plan", value: "$(warning) Plus" }],
         },

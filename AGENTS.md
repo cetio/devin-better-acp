@@ -35,7 +35,9 @@ devin-desktop --user-data-dir=/tmp/devin-better-acp-dev --extensions-dir=/tmp/de
   invocation. Never pass `--disable-slash-commands`, never reword `/usage` as a
   prompt, and stop polling if the envelope reports nonzero token usage.
 - The extension never discovers, reads, copies, or refreshes provider
-  credentials, and never writes to provider configuration.
+  credentials, and never writes to provider configuration. Antigravity's three
+  shim booleans are the only extension-owned launch snapshot, stored separately
+  at `~/.config/devin/devin-better-antigravity.json`.
 - CLI output is untrusted: validate shapes, bound output size, keep provider
   text escaped in hover markdown, and never surface raw stderr or API bodies.
 - Status items use the host's native status-bar, hover, and Quick Pick APIs with
@@ -45,7 +47,8 @@ devin-desktop --user-data-dir=/tmp/devin-better-acp-dev --extensions-dir=/tmp/de
 - `Install Devin Better Antigravity` is the only write path to the Desktop ACP
   registry. It installs the Python shim and integration modules and atomically
   replaces matching agent entries while preserving unrelated entries; it never
-  writes provider configuration or credentials.
+  writes provider configuration or credentials. Existing shim settings are read
+  from the separate extension-owned boolean snapshot on each ACP launch.
 
 ## ACP shim
 
@@ -194,3 +197,16 @@ and `dist/` for build output. Group source modules by domain, mirror those
 folders under `tests/unit/`, keep shared fixtures in `tests/support.ts`, and
 put host checks in `tests/integration/`. Do not add comments unless they carry
 protocol information that names cannot.
+
+## TypeScript usage monitoring
+
+`source/config.ts` owns the normalized extension-wide config and provider list.
+`source/codex/config.ts` and `source/antigravity/config.ts` own extension settings;
+`source/codex/cli.ts` and `source/antigravity/cli.ts` own their read-only CLI
+protocols. `source/cli.ts` shares executable discovery and bounded process
+lifecycle; `parse.ts` owns reused input guards and `poll.ts` owns fixed interval
+timers. `source/usage.ts` owns normalized usage types and service state. The one
+180-second default ticker retries ordinary errors; Antigravity token consumption
+is an explicit-retry safety stop. A separate minute tick updates display ages
+without invoking either provider CLI. Usage monitoring does not probe provider
+versions.

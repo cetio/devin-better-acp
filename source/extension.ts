@@ -94,8 +94,6 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
 
     queueLaunchSettingsSync();
     usage.configure(settings);
-    if (!vscode.workspace.isTrusted)
-        usage.setTrusted(false);
     render();
 
     context.subscriptions.push(

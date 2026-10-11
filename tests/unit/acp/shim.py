@@ -19,7 +19,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
-from source.antigravity import bridge as shim
+from source.antigravity import acp, bridge as shim
 from source.antigravity import prompt
 from source.antigravity.presentation.questions import QuestionCalls
 from source.antigravity.presentation.tools import ToolPresentation
@@ -1531,6 +1531,58 @@ def config():
                                    capture_output=True, check=True)
         launch = next(iter(json.loads(completed.stdout)["distribution"]["binary"].values()))
         self.assertIn("--system-prompt", launch["args"])
+
+
+    def test_extension_launch_settings_are_strict_and_bounded(self):
+        path = self.home / "devin-better-antigravity.json"
+        path.write_text(json.dumps({"spoofZed": False, "devinMcp": True, "systemPrompt": False}))
+        self.assertEqual(acp.load_extension_config(path), {
+            "spoofZed": False, "devinMcp": True, "systemPrompt": False,
+        })
+
+        for content in ("{broken", "{}", '{"spoofZed": "false", "devinMcp": true, "systemPrompt": false}',
+                        '{"spoofZed": false, "devinMcp": true, "systemPrompt": false, "other": true}'):
+            path.write_text(content)
+            with self.assertRaisesRegex(ValueError, "invalid JSON|invalid structure|boolean"):
+                acp.load_extension_config(path)
+        path.write_text("x" * (acp.MAX_EXTENSION_CONFIG_BYTES + 1))
+        with self.assertRaisesRegex(ValueError, "size limit"):
+            acp.load_extension_config(path)
+        with self.assertRaisesRegex(ValueError, "absolute"):
+            acp.load_extension_config(Path("relative.json"))
+
+    def test_launch_settings_are_read_once_when_constructing_the_bridge(self):
+        path = self.home / "devin-better-antigravity.json"
+        path.write_text(json.dumps({"spoofZed": False, "devinMcp": True, "systemPrompt": False}))
+        with patch.object(acp, "Bridge") as bridge:
+            bridge.return_value.run.return_value = 0
+            with patch("sys.argv", [
+                str(SHIM), "--server", sys.executable, "--extension-config", str(path),
+            ]):
+                self.assertEqual(acp.main(), 0)
+        bridge.assert_called_once_with(Path(sys.executable).resolve(), [], False, True, False)
+
+    def test_registry_entry_uses_the_extension_config_path_without_baked_flags(self):
+        config_path = self.home / "devin-better-antigravity.json"
+        entry = acp.registry_entry(Path(sys.executable), [], False, acp.DEFAULT_ICON_URL, False, False, config_path)
+        launch = next(iter(entry["distribution"]["binary"].values()))
+        self.assertIn("--extension-config", launch["args"])
+        self.assertIn(str(config_path), launch["args"])
+        self.assertNotIn("--spoof-zed", launch["args"])
+        self.assertNotIn("--devin-config", launch["args"])
+        self.assertNotIn("--system-prompt", launch["args"])
+
+
+    def test_extension_config_rejects_ambiguous_legacy_flags_for_registry_entries(self):
+        path = self.home / "devin-better-antigravity.json"
+        path.write_text(json.dumps({"spoofZed": True, "devinMcp": True, "systemPrompt": True}))
+        error_stream = io.StringIO()
+        with patch("sys.argv", [
+            str(SHIM), "--registry-entry", "--extension-config", str(path), "--spoof-zed",
+        ]), patch("sys.stderr", error_stream):
+            with self.assertRaises(SystemExit):
+                acp.main()
+        self.assertIn("--extension-config cannot be combined", error_stream.getvalue())
 
 
 if __name__ == "__main__":

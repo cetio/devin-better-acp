@@ -68,70 +68,95 @@
         "category": "Devin Better ACP"
       }
     ],
-    "configuration": {
-      "title": "Devin Better ACP",
-      "properties": {
-        "devinBetterACP.codex.enabled": {
-          "type": "boolean",
-          "default": true,
-          "scope": "application",
-          "description": "Show Codex subscription allowance in the status bar."
-        },
-        "devinBetterACP.codex.path": {
-          "type": "string",
-          "default": "",
-          "scope": "machine",
-          "description": "Absolute path to the codex CLI. Leave empty to search PATH and ~/.local/bin."
-        },
-        "devinBetterACP.antigravity.enabled": {
-          "type": "boolean",
-          "default": true,
-          "scope": "application",
-          "description": "Show Antigravity CLI allowance in the status bar."
-        },
-        "devinBetterACP.antigravity.path": {
-          "type": "string",
-          "default": "",
-          "scope": "machine",
-          "description": "Absolute path to the agy CLI. Leave empty to search PATH and ~/.local/bin."
-        },
-        "devinBetterACP.refreshIntervalSeconds": {
-          "type": "number",
-          "default": 300,
-          "minimum": 0,
-          "scope": "application",
-          "description": "Seconds between background refreshes. 0 refreshes at startup and on request only. Values between 1 and 59 are raised to 60."
-        },
-        "devinBetterACP.statusBar.alignment": {
-          "type": "string",
-          "enum": [
-            "left",
-            "right"
-          ],
-          "default": "right",
-          "scope": "application",
-          "description": "Status-bar side for the usage items."
-        },
-        "devinBetterACP.statusBar.showCodex": {
-          "type": "boolean",
-          "default": true,
-          "scope": "application",
-          "description": "Show the Codex status-bar item."
-        },
-        "devinBetterACP.statusBar.showAntigravity": {
-          "type": "boolean",
-          "default": true,
-          "scope": "application",
-          "description": "Show the Antigravity status-bar item."
+    "configuration": [
+      {
+        "title": "Devin Better ACP",
+        "properties": {
+          "devinBetterACP.codex.enabled": {
+            "type": "boolean",
+            "default": true,
+            "scope": "application",
+            "description": "Show Codex subscription allowance in the status bar."
+          },
+          "devinBetterACP.codex.path": {
+            "type": "string",
+            "default": "",
+            "scope": "machine",
+            "description": "Absolute path to the codex CLI. Leave empty to search PATH and ~/.local/bin."
+          },
+          "devinBetterACP.refreshIntervalSeconds": {
+            "type": "number",
+            "default": 180,
+            "minimum": 0,
+            "scope": "application",
+            "description": "Seconds between background refreshes, including while unfocused. 0 disables background polling; positive values below 60 are allowed."
+          },
+          "devinBetterACP.statusBar.alignment": {
+            "type": "string",
+            "enum": [
+              "left",
+              "right"
+            ],
+            "default": "right",
+            "scope": "application",
+            "description": "Status-bar side for the usage items."
+          },
+          "devinBetterACP.statusBar.showCodex": {
+            "type": "boolean",
+            "default": true,
+            "scope": "application",
+            "description": "Show the Codex status-bar item."
+          }
+        }
+      },
+      {
+        "title": "Devin Better Antigravity",
+        "properties": {
+          "devinBetterACP.antigravity.enabled": {
+            "type": "boolean",
+            "default": true,
+            "scope": "application",
+            "description": "Show Antigravity CLI allowance in the status bar."
+          },
+          "devinBetterACP.antigravity.path": {
+            "type": "string",
+            "default": "",
+            "scope": "machine",
+            "description": "Absolute path to the agy CLI. Leave empty to search PATH and ~/.local/bin."
+          },
+          "devinBetterACP.statusBar.showAntigravity": {
+            "type": "boolean",
+            "default": true,
+            "scope": "application",
+            "description": "Show the Antigravity status-bar item."
+          },
+          "devinBetterACP.antigravity.spoofZed": {
+            "type": "boolean",
+            "default": true,
+            "scope": "application",
+            "description": "Send the Zed client name to Antigravity for compatibility. Takes effect after Devin: Reload ACP Connections."
+          },
+          "devinBetterACP.antigravity.devinMcp": {
+            "type": "boolean",
+            "default": true,
+            "scope": "application",
+            "description": "Merge Devin MCP servers into Antigravity sessions. Takes effect after Devin: Reload ACP Connections."
+          },
+          "devinBetterACP.antigravity.systemPrompt": {
+            "type": "boolean",
+            "default": true,
+            "scope": "application",
+            "description": "Use the adapted Devin system prompt in a temporary Antigravity launch copy. Takes effect after Devin: Reload ACP Connections."
+          }
         }
       }
-    }
+    ]
   },
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && npm run test:unit && npm run test:acp",
-    "test:unit": "node --test \"dist/tests/unit/{*.js,allowance/*.js,antigravity/*.js,codex/*.js,process/*.js,ui/*.js}\"",
+    "test:unit": "node --test \"dist/tests/unit/{cli,config,extension,parse,poll,usage}.js\" \"dist/tests/unit/antigravity/{config,install,usage}.js\" \"dist/tests/unit/codex/{config,usage}.js\" \"dist/tests/unit/ui/{format,picker,status}.js\"",
     "test:acp": "python3 -m unittest discover -s tests/unit/acp -p '*.py'",
     "test:integration": "npm run build && node .devin/runintegration.mjs",
     "package:files": "vsce ls --no-dependencies --ignoreFile .devin/packageignore",

@@ -3,30 +3,46 @@ import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { ConnectionState } from "../../../source/allowance/model";
-import { createCodexAdapter, parseRateLimits } from "../../../source/codex/usage";
-import { AdapterError, ProviderInvocation } from "../../../source/adapter";
+import { codexCLI } from "../../../source/codex/cli";
+import type { CodexConfig } from "../../../source/codex/config";
+import { parseRateLimits } from "../../../source/codex/usage";
+import { ConnectionState, UsageError } from "../../../source/usage";
+import type { CliContext } from "../../../source/cli";
 import { codexPool, codexRateLimits, codexServerScript, tempDir, writeScript } from "../../support";
 
-const OBSERVED_AT = 1790000000000;
-
-function invocation(script: string, directory: string, timeoutMs = 5000): ProviderInvocation
+function config(script: string): CodexConfig
 {
     return {
-        command: script,
-        readArgs: [],
-        versionArgs: ["version"],
-        cwd: directory,
-        timeoutMs,
-        versionTimeoutMs: 5000,
+        id: "codex",
+        label: "Codex",
+        enabled: true,
+        path: script,
+        visible: true,
+        cli: codexCLI,
     };
 }
 
-test("codex rate limits map to labeled pools with metadata", () =>
+function cliContext(directory: string): CliContext
 {
-    const result = parseRateLimits(codexRateLimits({ planType: "pro" }), OBSERVED_AT);
+    return {
+        workingDirectory: directory,
+        workspacePaths: [],
+        environment: { PATH: "" },
+        home: directory,
+        clientVersion: "0.1.0",
+    };
+}
 
-    assert.equal(result.observedAt, OBSERVED_AT);
+function removeDirectory(path: string): void
+{
+    rmSync(path, { recursive: true, force: true });
+}
+
+test("Codex rate limits map to labeled pools with metadata", () =>
+{
+    const result = parseRateLimits(codexRateLimits({ planType: "pro" }));
+
+    assert.equal(result.partial, false);
     assert.equal(result.pools.length, 1);
     const pool = result.pools[0];
     assert.ok(pool !== undefined);
@@ -43,7 +59,7 @@ test("codex rate limits map to labeled pools with metadata", () =>
     ]);
 });
 
-test("codex extra pools are preserved without replacing the primary pool", () =>
+test("Codex preserves extra pools and their limit labels", () =>
 {
     const extra = {
         limitId: "codex_other",
@@ -51,7 +67,7 @@ test("codex extra pools are preserved without replacing the primary pool", () =>
         primary: codexPool({ usedPercent: 42, durationMinutes: 60 }),
         secondary: null,
     };
-    const result = parseRateLimits(codexRateLimits({ extraPools: { codex_other: extra } }), OBSERVED_AT);
+    const result = parseRateLimits(codexRateLimits({ extraPools: { codex_other: extra } }));
 
     assert.deepEqual(result.pools.map((pool) => pool.id), ["codex", "codex_other"]);
     assert.equal(result.pools[0]?.windows[0]?.usedPercent, 3);
@@ -59,68 +75,72 @@ test("codex extra pools are preserved without replacing the primary pool", () =>
     assert.equal(result.pools[1]?.windows[0]?.label, "1h");
 });
 
-test("codex falls back to the single-bucket view when the map is absent or empty", () =>
+test("Codex falls back to the single-pool view when its pool map is absent or empty", () =>
 {
-    const withoutMap = parseRateLimits(codexRateLimits({ includeByLimitId: false }), OBSERVED_AT);
+    const withoutMap = parseRateLimits(codexRateLimits({ includeByLimitId: false }));
     assert.equal(withoutMap.pools.length, 1);
     assert.equal(withoutMap.pools[0]?.id, "codex");
 
     const withEmptyMap = codexRateLimits();
     withEmptyMap.rateLimitsByLimitId = {};
-    const empty = parseRateLimits(withEmptyMap, OBSERVED_AT);
+    const empty = parseRateLimits(withEmptyMap);
     assert.equal(empty.pools.length, 1);
     assert.equal(empty.pools[0]?.windows.length, 2);
 });
 
-test("codex skips unusable windows and rejects empty pools", () =>
+test("Codex skips unusable windows and rejects empty pools", () =>
 {
     const partial = codexRateLimits({ secondary: null, primary: codexPool({ usedPercent: 12.5 }) });
-    const result = parseRateLimits(partial, OBSERVED_AT);
+    const result = parseRateLimits(partial);
     assert.equal(result.pools[0]?.windows.length, 1);
     assert.equal(result.pools[0]?.windows[0]?.usedPercent, 12.5);
 
     const invalid = codexRateLimits({ primary: { usedPercent: "many" }, secondary: { windowDurationMins: 300 } });
-    assert.throws(() => parseRateLimits(invalid, OBSERVED_AT), (error: unknown) =>
-        error instanceof AdapterError && error.state === ConnectionState.Unsupported);
+    assert.throws(() => parseRateLimits(invalid), (error: unknown) =>
+        error instanceof UsageError && error.state === ConnectionState.Unsupported);
 });
 
-test("codex keeps zero and over-limit usage values", () =>
+test("Codex preserves zero and over-limit usage values", () =>
 {
     const result = parseRateLimits(codexRateLimits({
         primary: codexPool({ usedPercent: 0 }),
         secondary: codexPool({ usedPercent: 140, durationMinutes: 10080 }),
-    }), OBSERVED_AT);
+    }));
 
     assert.equal(result.pools[0]?.windows[0]?.usedPercent, 0);
     assert.equal(result.pools[0]?.windows[1]?.usedPercent, 140);
 });
 
-test("the codex adapter sends only the allowlisted read-only requests", async (context) =>
+test("the Codex CLI sends only the allowlisted read-only requests", async (context) =>
 {
     const directory = tempDir("devin-better-acp-codex-");
     context.after(() => removeDirectory(directory));
     const logPath = join(directory, "requests.log");
+    const launchLogPath = join(directory, "launch-args.log");
     const script = writeScript(directory, "codex.cjs", codexServerScript({
         account: { account: { type: "chatgpt", planType: "plus" }, requiresOpenaiAuth: true },
         rateLimits: codexRateLimits(),
         rpcError: undefined,
         ignoreRequests: false,
+        launchLogPath,
     }, logPath));
-    const adapter = createCodexAdapter(invocation(script, directory), "0.1.0");
-    const result = await adapter.read(new AbortController().signal);
+    const report = await codexCLI.readUsage(config(script), cliContext(directory), new AbortController().signal);
 
-    assert.equal(result.pools[0]?.id, "codex");
+    assert.equal(report.pools[0]?.id, "codex");
     const requests = readFileSync(logPath, "utf8").trim().split("\n");
-    const methods = requests.map((line) => (JSON.parse(line) as Record<string, unknown>).method);
-    assert.deepEqual(methods, ["initialize", "initialized", "account/read", "account/rateLimits/read"]);
-    const initialized = JSON.parse(requests[1] ?? "") as Record<string, unknown>;
-    assert.equal(initialized.id, undefined);
-    const account = JSON.parse(requests[2] ?? "") as Record<string, unknown>;
-    assert.deepEqual(account.params, { refreshToken: false });
+    const messages = requests.map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.deepEqual(messages.map((message) => message.method), [
+        "initialize", "initialized", "account/read", "account/rateLimits/read",
+    ]);
+    assert.equal((messages[0]?.params as { clientInfo: { version: string } }).clientInfo.version, "0.1.0");
+    assert.deepEqual(messages[2]?.params, { refreshToken: false });
     assert.equal(requests.length, 4);
+    const launchArgs = readFileSync(launchLogPath, "utf8");
+    assert.equal(launchArgs, "app-server --stdio");
+    assert.equal(launchArgs.includes("--version"), false);
 });
 
-test("the codex adapter reports missing or non-ChatGPT logins truthfully", async (context) =>
+test("Codex reports missing and non-ChatGPT accounts without exposing response bodies", async (context) =>
 {
     const directory = tempDir("devin-better-acp-codex-");
     context.after(() => removeDirectory(directory));
@@ -130,76 +150,71 @@ test("the codex adapter reports missing or non-ChatGPT logins truthfully", async
         rpcError: undefined,
         ignoreRequests: false,
     }));
-    const signedOutAdapter = createCodexAdapter(invocation(signedOut, directory), "0.1.0");
-    await assert.rejects(signedOutAdapter.read(new AbortController().signal), (error: unknown) =>
-        error instanceof AdapterError && error.state === ConnectionState.AuthRequired);
+    await assert.rejects(
+        codexCLI.readUsage(config(signedOut), cliContext(directory), new AbortController().signal),
+        (error: unknown) => error instanceof UsageError && error.state === ConnectionState.AuthRequired,
+    );
 
     const apiKey = writeScript(directory, "api-key.cjs", codexServerScript({
-        account: { account: { type: "apiKey" }, requiresOpenaiAuth: true },
+        account: { account: { type: "apiKey", token: "PRIVATE" } },
         rateLimits: codexRateLimits(),
         rpcError: undefined,
         ignoreRequests: false,
     }));
-    const apiKeyAdapter = createCodexAdapter(invocation(apiKey, directory), "0.1.0");
-    await assert.rejects(apiKeyAdapter.read(new AbortController().signal), (error: unknown) =>
-        error instanceof AdapterError && error.state === ConnectionState.Unsupported);
+    await assert.rejects(
+        codexCLI.readUsage(config(apiKey), cliContext(directory), new AbortController().signal),
+        (error: unknown) => error instanceof UsageError && error.state === ConnectionState.Unsupported
+            && !error.message.includes("PRIVATE"),
+    );
 });
 
-test("the codex adapter classifies app-server errors", async (context) =>
+test("Codex classifies RPC failures without showing provider error bodies", async (context) =>
 {
     const directory = tempDir("devin-better-acp-codex-");
     context.after(() => removeDirectory(directory));
     const unsupported = writeScript(directory, "unsupported.cjs", codexServerScript({
         account: { account: { type: "chatgpt" } },
         rateLimits: codexRateLimits(),
-        rpcError: { code: -32601, message: "method not found" },
+        rpcError: { code: -32601, message: "method not found PRIVATE" },
         ignoreRequests: false,
     }));
-    const unsupportedAdapter = createCodexAdapter(invocation(unsupported, directory), "0.1.0");
-    await assert.rejects(unsupportedAdapter.read(new AbortController().signal), (error: unknown) =>
-        error instanceof AdapterError && error.state === ConnectionState.Unsupported);
+    await assert.rejects(
+        codexCLI.readUsage(config(unsupported), cliContext(directory), new AbortController().signal),
+        (error: unknown) => error instanceof UsageError && error.state === ConnectionState.Unsupported
+            && !error.message.includes("PRIVATE"),
+    );
 
     const auth = writeScript(directory, "auth.cjs", codexServerScript({
         account: { account: { type: "chatgpt" } },
         rateLimits: codexRateLimits(),
-        rpcError: { code: -32600, message: "chatgpt authentication required to read rate limits" },
+        rpcError: { code: -32600, message: "authentication required PRIVATE" },
         ignoreRequests: false,
     }));
-    const authAdapter = createCodexAdapter(invocation(auth, directory), "0.1.0");
-    await assert.rejects(authAdapter.read(new AbortController().signal), (error: unknown) =>
-        error instanceof AdapterError && error.state === ConnectionState.AuthRequired);
+    await assert.rejects(
+        codexCLI.readUsage(config(auth), cliContext(directory), new AbortController().signal),
+        (error: unknown) => error instanceof UsageError && error.state === ConnectionState.AuthRequired
+            && !error.message.includes("PRIVATE"),
+    );
 });
 
-test("a silent codex app-server fails as unavailable", async (context) =>
+test("the Codex CLI rediscovers an executable on each read", async (context) =>
 {
     const directory = tempDir("devin-better-acp-codex-");
     context.after(() => removeDirectory(directory));
-    const script = writeScript(directory, "silent.cjs", codexServerScript({
-        account: { account: { type: "chatgpt" } },
-        rateLimits: codexRateLimits(),
-        rpcError: undefined,
-        ignoreRequests: true,
-    }));
-    const adapter = createCodexAdapter(invocation(script, directory, 400), "0.1.0");
-    await assert.rejects(adapter.read(new AbortController().signal), (error: unknown) =>
-        error instanceof AdapterError && error.state === ConnectionState.Unavailable);
-});
+    const commandDirectory = join(directory, "bin");
+    const invocation = { ...cliContext(directory), environment: { PATH: commandDirectory } };
+    const settings = config("");
+    await assert.rejects(
+        codexCLI.readUsage(settings, invocation, new AbortController().signal),
+        (error: unknown) => error instanceof UsageError && error.state === ConnectionState.MissingCli,
+    );
 
-test("the codex adapter reports its version", async (context) =>
-{
-    const directory = tempDir("devin-better-acp-codex-");
-    context.after(() => removeDirectory(directory));
-    const script = writeScript(directory, "codex.cjs", codexServerScript({
+    writeScript(commandDirectory, "codex", codexServerScript({
         account: { account: { type: "chatgpt" } },
         rateLimits: codexRateLimits(),
         rpcError: undefined,
         ignoreRequests: false,
     }));
-    const adapter = createCodexAdapter(invocation(script, directory), "0.1.0");
-    assert.equal(await adapter.version(new AbortController().signal), "codex-cli 0.160.0");
+    const result = await codexCLI.readUsage(settings, invocation, new AbortController().signal);
+    assert.equal(result.pools[0]?.id, "codex");
 });
-
-function removeDirectory(path: string): void
-{
-    rmSync(path, { recursive: true, force: true });
-}
