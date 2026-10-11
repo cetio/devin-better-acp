@@ -10,7 +10,7 @@
     "type": "git",
     "url": "https://github.com/cetio/devin-better-acp.git"
   },
-  "icon": "images/clock-history.png",
+  "icon": "images/at.png",
   "engines": {
     "vscode": "^1.90.0"
   },
