@@ -167,6 +167,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
         {
             void vscode.env.openExternal(vscode.Uri.parse(CHATGPT_USAGE_URL));
         }),
+        // TODO: Offer to update the ACP when it is already installed instead of only offering installation.
         vscode.commands.registerCommand("devinBetterACP.installAntigravity", async () =>
         {
             const paths = antigravityInstallPaths();

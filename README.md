@@ -29,7 +29,7 @@ Build the VSIX and install it:
 ```sh
 npm ci
 npm run package
-devin-desktop --install-extension bin/devin-better-acp-0.3.3.vsix
+devin-desktop --install-extension bin/devin-better-acp-1.0.0.vsix
 ```
 
 Reload the window after installing.

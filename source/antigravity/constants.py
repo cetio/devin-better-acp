@@ -1,7 +1,7 @@
 from pathlib import Path
 
 
-VERSION = "0.3.0"
+VERSION = "0.5.0"
 DEFAULT_SERVER = Path.home() / ".local/opt/agy-acp/current/agy_acp_server.par"
 DEFAULT_DEBUG_LOG = Path.home() / ".local/state/devin-better-acp/antigravity-acp.jsonl"
 DEFAULT_ICON_URL = "https://cdn.jsdelivr.net/gh/cetio/devin-better-acp@main/images/antigravity-acp.svg"

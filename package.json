@@ -2,7 +2,7 @@
   "name": "devin-better-acp",
   "displayName": "Devin Better ACP",
   "description": "Shows Codex and Antigravity CLI allowance usage in the status bar.",
-  "version": "0.3.3",
+  "version": "1.0.0",
   "license": "MIT",
   "private": true,
   "publisher": "cet",
@@ -140,7 +140,7 @@
     "test:acp": "python3 -m unittest discover -s tests/unit/acp -p '*.py'",
     "test:integration": "npm run build && node .devin/runintegration.mjs",
     "package:files": "vsce ls --no-dependencies --ignoreFile .devin/packageignore",
-    "package": "npm run build && vsce package --no-dependencies --ignoreFile .devin/packageignore --out bin/devin-better-acp-0.3.3.vsix"
+    "package": "npm run build && vsce package --no-dependencies --ignoreFile .devin/packageignore --out bin/devin-better-acp-1.0.0.vsix"
   },
   "devDependencies": {
     "@types/node": "22.20.4",
