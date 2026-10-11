@@ -1,20 +1,14 @@
 import {
-    compareWindows,
     formatAge,
     formatCountdown,
     formatPercent,
     formatResetMoment,
-} from "../allowance/format";
-import { snapshotIsStale } from "../allowance/schedule";
-import {
-    ConnectionState,
-    ProviderId,
-    ProviderStatus,
-    UsagePool,
-    UsageWindow,
-} from "../allowance/model";
-import { UsageState } from "../usage";
-import { describeState, DisplayContext } from "./status";
+    snapshotIsStale,
+} from "./format";
+import { ConnectionState } from "../usage";
+import type { ProviderId, ProviderStatus, UsagePool, UsageState, UsageWindow } from "../usage";
+import { describeState } from "./status";
+import type { DisplayContext } from "./status";
 
 import * as vscode from "vscode";
 
@@ -117,7 +111,7 @@ export function pickerItems(
                     detail: status.message,
                 }));
             }
-            for (const window of [...pool.windows].sort(compareWindows))
+            for (const window of pool.windows)
             {
                 items.push(pick({
                     id: `window.${status.provider}.${pool.id}.${window.id}`,
@@ -142,7 +136,7 @@ export function pickerItems(
             id: `updated.${status.provider}`,
             label: "Updated",
             description: updatedText(status, context),
-            detail: status.cliVersion === undefined ? status.label : `${status.label} · CLI ${status.cliVersion}`,
+            detail: status.label,
         }));
     }
     items.push(separator("actions", "Actions"));
@@ -164,7 +158,7 @@ export function managementItems(statuses: ProviderStatus[], focus?: PickerFocus)
         items.push(pick({
             id: `action.retry.${status.provider}`,
             label: `$(plug) Reconnect ${status.label}`,
-            detail: "Recheck the CLI version and refresh usage",
+            detail: "Retry the CLI connection and refresh usage",
             action: { kind: "retry", provider: status.provider },
         }));
         items.push(pick({

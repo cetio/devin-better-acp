@@ -4,16 +4,10 @@ import {
     formatAge,
     formatPercent,
     sanitizeLabel,
-} from "../allowance/format";
-import { snapshotIsStale } from "../allowance/schedule";
-import {
-    ConnectionState,
-    ProviderId,
-    ProviderStatus,
-    UsagePool,
-    UsageWindow,
-} from "../allowance/model";
-import { UsageState } from "../usage";
+    snapshotIsStale,
+} from "./format";
+import { ConnectionState } from "../usage";
+import type { ProviderId, ProviderStatus, UsagePool, UsageState, UsageWindow } from "../usage";
 
 import * as vscode from "vscode";
 
