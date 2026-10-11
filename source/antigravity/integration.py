@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 
+import concurrent.futures
 import json
 import os
+import shutil
+import signal
 import socket
+import subprocess
 import sys
+from pathlib import Path
 
 
 NAME = "devin-better-integration"
@@ -11,6 +16,14 @@ VERSION = "0.1.0"
 PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
 MAX_MESSAGE_BYTES = 1024 * 1024
 SOCKET_TIMEOUT_SECONDS = 600
+SHELL = shutil.which("bash") or shutil.which("sh") or "sh"
+MAX_BATCH_ITEMS = 8
+MAX_COMMAND_CHARS = 16000
+MAX_STREAM_BYTES = 64 * 1024
+MAX_READ_BYTES = 256 * 1024
+MAX_WRITE_BYTES = 1024 * 1024
+DEFAULT_COMMAND_TIMEOUT = 120
+MAX_COMMAND_TIMEOUT = 600
 
 
 class IntegrationError(ValueError):
@@ -239,7 +252,9 @@ def render_question_answers(content: object, questions: list[dict]) -> dict:
     return {"answers": answers}
 
 
-def ask_user_question(arguments: object, bridge: IntegrationBridge) -> dict:
+def ask_user_question(arguments: object, bridge: IntegrationBridge | None) -> dict:
+    if bridge is None:
+        raise IntegrationError("The local integration bridge is unavailable")
     parameters, questions = build_question_form(arguments)
     response = bridge.request("elicitation/create", parameters)
     action = response.get("action")
@@ -253,11 +268,268 @@ def ask_user_question(arguments: object, bridge: IntegrationBridge) -> dict:
     return {"content": [{"type": "text", "text": json.dumps(answers, ensure_ascii=False)}]}
 
 
+def batch_execute_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "commands": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": MAX_BATCH_ITEMS,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "minLength": 1},
+                        "cwd": {"type": "string", "minLength": 1},
+                        "timeout": {"type": "integer", "minimum": 1, "maximum": MAX_COMMAND_TIMEOUT},
+                    },
+                    "required": ["command"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["commands"],
+        "additionalProperties": False,
+    }
+
+
+def batch_read_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "files": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": MAX_BATCH_ITEMS,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "minLength": 1},
+                        "offset": {"type": "integer", "minimum": 1},
+                        "limit": {"type": "integer", "minimum": 1},
+                    },
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["files"],
+        "additionalProperties": False,
+    }
+
+
+def batch_write_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "files": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": MAX_BATCH_ITEMS,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "minLength": 1},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["path", "content"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["files"],
+        "additionalProperties": False,
+    }
+
+
+def command_specs(arguments: object) -> list[dict]:
+    if not isinstance(arguments, dict) or set(arguments) != {"commands"}:
+        raise IntegrationError(f"Provide one to {MAX_BATCH_ITEMS} commands")
+    commands = arguments["commands"]
+    if not isinstance(commands, list) or not 1 <= len(commands) <= MAX_BATCH_ITEMS:
+        raise IntegrationError(f"Provide one to {MAX_BATCH_ITEMS} commands")
+    ret: list[dict] = []
+    for item in commands:
+        if not isinstance(item, dict) or set(item) - {"command", "cwd", "timeout"}:
+            raise IntegrationError("Each entry needs a command and optional cwd and timeout")
+        command = item.get("command")
+        if not isinstance(command, str) or not command.strip() or len(command) > MAX_COMMAND_CHARS:
+            raise IntegrationError(f"Each command needs 1 to {MAX_COMMAND_CHARS} characters")
+        cwd = item.get("cwd")
+        if cwd is not None and (not isinstance(cwd, str) or not cwd.strip()):
+            raise IntegrationError("cwd must be a directory path")
+        timeout = item.get("timeout", DEFAULT_COMMAND_TIMEOUT)
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= MAX_COMMAND_TIMEOUT:
+            raise IntegrationError(f"timeout must be between 1 and {MAX_COMMAND_TIMEOUT} seconds")
+        ret.append({"command": command, "cwd": cwd, "timeout": timeout})
+    return ret
+
+
+def files_argument(arguments: object) -> list:
+    if not isinstance(arguments, dict) or set(arguments) != {"files"}:
+        raise IntegrationError(f"Provide one to {MAX_BATCH_ITEMS} files")
+    files = arguments["files"]
+    if not isinstance(files, list) or not 1 <= len(files) <= MAX_BATCH_ITEMS:
+        raise IntegrationError(f"Provide one to {MAX_BATCH_ITEMS} files")
+    return files
+
+
+def read_specs(arguments: object) -> list[dict]:
+    ret: list[dict] = []
+    for item in files_argument(arguments):
+        if not isinstance(item, dict) or set(item) - {"path", "offset", "limit"}:
+            raise IntegrationError("Each entry needs a path and optional offset and limit")
+        path = item.get("path")
+        if not isinstance(path, str) or not path:
+            raise IntegrationError("Each file needs a path")
+        offset = item.get("offset", 1)
+        limit = item.get("limit")
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 1:
+            raise IntegrationError("offset must be a positive line number")
+        if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool) or limit < 1):
+            raise IntegrationError("limit must be a positive line count")
+        ret.append({"path": path, "offset": offset, "limit": limit})
+    return ret
+
+
+def write_specs(arguments: object) -> list[dict]:
+    ret: list[dict] = []
+    for item in files_argument(arguments):
+        if not isinstance(item, dict) or set(item) != {"path", "content"}:
+            raise IntegrationError("Each entry needs a path and content")
+        path = item.get("path")
+        content = item.get("content")
+        if not isinstance(path, str) or not path:
+            raise IntegrationError("Each file needs a path")
+        if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_WRITE_BYTES:
+            raise IntegrationError(f"Each file needs text content within {MAX_WRITE_BYTES // 1024} KiB")
+        ret.append({"path": path, "content": content})
+    return ret
+
+
+def stream_text(data: bytes) -> str:
+    if len(data) <= MAX_STREAM_BYTES:
+        return data.decode("utf-8", errors="replace")
+    truncated = data[-MAX_STREAM_BYTES:].decode("utf-8", errors="replace")
+    return f"[{len(data) - MAX_STREAM_BYTES} bytes truncated]\n{truncated}"
+
+
+def run_command(spec: dict) -> dict:
+    cwd = spec["cwd"]
+    if cwd is not None and not os.path.isdir(cwd):
+        return {"command": spec["command"], "error": "cwd is not a directory"}
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("DBA_")}
+    try:
+        process = subprocess.Popen(
+            [SHELL, "-c", spec["command"]],
+            cwd=cwd,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as error:
+        return {"command": spec["command"], "error": f"Could not start the command: {error}"}
+    timed_out = False
+    try:
+        stdout, stderr = process.communicate(timeout=spec["timeout"])
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        stdout, stderr = process.communicate()
+    ret = {
+        "command": spec["command"],
+        "exit_code": process.returncode,
+        "stdout": stream_text(stdout),
+        "stderr": stream_text(stderr),
+    }
+    if timed_out:
+        ret["timed_out"] = True
+    return ret
+
+
+def read_file(spec: dict) -> dict:
+    path = spec["path"]
+    try:
+        with open(path, "rb") as stream:
+            data = stream.read(MAX_READ_BYTES + 1)
+    except OSError as error:
+        return {"path": path, "error": str(error)}
+    if b"\x00" in data[:8192]:
+        return {"path": path, "error": "The file is binary"}
+    truncated = len(data) > MAX_READ_BYTES
+    lines = data[:MAX_READ_BYTES].decode("utf-8", errors="replace").splitlines()
+    ret = {"path": path, "line_count": len(lines)}
+    lines = lines[spec["offset"] - 1:]
+    if spec["limit"] is not None:
+        lines = lines[:spec["limit"]]
+    ret["content"] = "\n".join(lines)
+    if truncated:
+        ret["truncated"] = True
+    return ret
+
+
+def write_file(spec: dict) -> dict:
+    path = spec["path"]
+    data = spec["content"].encode("utf-8")
+    try:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    except OSError as error:
+        return {"path": path, "error": str(error)}
+    return {"path": path, "bytes": len(data)}
+
+
+def batch_text(results: list[dict]) -> dict:
+    return {"content": [{"type": "text", "text": json.dumps({"results": results}, ensure_ascii=False)}]}
+
+
+def batch_execute(arguments: object, bridge: IntegrationBridge | None) -> dict:
+    specs = command_specs(arguments)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(specs)) as executor:
+        results = list(executor.map(run_command, specs))
+    return batch_text(results)
+
+
+def batch_read(arguments: object, bridge: IntegrationBridge | None) -> dict:
+    return batch_text([read_file(spec) for spec in read_specs(arguments)])
+
+
+def batch_write(arguments: object, bridge: IntegrationBridge | None) -> dict:
+    return batch_text([write_file(spec) for spec in write_specs(arguments)])
+
+
 INTEGRATIONS = {
     "ask_user_question": {
         "description": "Ask the user one to four structured questions and wait for their answers.",
         "inputSchema": question_tool_schema(),
         "handler": ask_user_question,
+    },
+    "batch_execute": {
+        "description": "Run up to 8 shell commands in parallel via bash. Each command may set a cwd and "
+        "a timeout in seconds (default 120, maximum 600) and is killed with its process group on timeout. "
+        "Output is truncated to the last 64 KiB per stream. Returns per-command exit_code, stdout, stderr, "
+        "and timed_out, or a per-command error.",
+        "inputSchema": batch_execute_schema(),
+        "handler": batch_execute,
+    },
+    "batch_read": {
+        "description": "Read up to 8 text files in one call. Each entry may set a 1-based line offset and a "
+        "line limit. Contents are capped at 256 KiB per file. Returns per-file content, line_count, and "
+        "truncated, or a per-file error.",
+        "inputSchema": batch_read_schema(),
+        "handler": batch_read,
+    },
+    "batch_write": {
+        "description": "Write up to 8 files in one call, creating parent directories and overwriting existing "
+        "files. Returns per-file byte counts or per-file errors.",
+        "inputSchema": batch_write_schema(),
+        "handler": batch_write,
     },
 }
 
@@ -307,8 +579,6 @@ def handle_message(message: object, bridge: IntegrationBridge | None) -> dict | 
             "message": "Unknown integration tool",
         }}
     try:
-        if bridge is None:
-            raise IntegrationError("The local integration bridge is unavailable")
         result = integration["handler"](parameters.get("arguments", {}), bridge)
     except (IntegrationError, OSError, TimeoutError) as error:
         result = {"isError": True, "content": [{"type": "text", "text": str(error)}]}

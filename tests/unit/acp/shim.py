@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -249,7 +250,99 @@ class ShimTests(unittest.TestCase):
         )
         responses = [json.loads(line) for line in completed.stdout.splitlines()]
         self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "devin-better-integration")
-        self.assertEqual([tool["name"] for tool in responses[1]["result"]["tools"]], ["ask_user_question"])
+        self.assertEqual(
+            [tool["name"] for tool in responses[1]["result"]["tools"]],
+            ["ask_user_question", "batch_execute", "batch_read", "batch_write"],
+        )
+
+    def integration_call(self, name, arguments, bridge=None):
+        ret = integration.handle_message({
+            "jsonrpc": "2.0",
+            "id": "batch-call",
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        }, bridge)
+        self.assertEqual(ret["id"], "batch-call")
+        return ret["result"]
+
+    def test_integration_batch_execute_runs_commands_in_parallel(self):
+        started = time.monotonic()
+        result = self.integration_call("batch_execute", {"commands": [
+            {"command": "sleep 0.5 && echo one"},
+            {"command": "sleep 0.5 && echo two"},
+            {"command": "sleep 0.5 && echo three", "timeout": 30},
+        ]})
+        elapsed = time.monotonic() - started
+        results = json.loads(result["content"][0]["text"])["results"]
+        self.assertEqual([entry["exit_code"] for entry in results], [0, 0, 0])
+        self.assertEqual([entry["stdout"].strip() for entry in results], ["one", "two", "three"])
+        self.assertLess(elapsed, 1.5)
+
+    def test_integration_batch_execute_reports_failures_and_timeouts(self):
+        result = self.integration_call("batch_execute", {"commands": [
+            {"command": "echo out && echo err >&2 && exit 3"},
+            {"command": "sleep 30", "timeout": 1},
+            {"command": "echo hi", "cwd": str(Path(self.directory.name) / "missing")},
+        ]})
+        results = json.loads(result["content"][0]["text"])["results"]
+        self.assertEqual(results[0]["exit_code"], 3)
+        self.assertEqual(results[0]["stdout"].strip(), "out")
+        self.assertEqual(results[0]["stderr"].strip(), "err")
+        self.assertTrue(results[1]["timed_out"])
+        self.assertEqual(results[1]["exit_code"], -9)
+        self.assertEqual(results[2]["error"], "cwd is not a directory")
+
+    def test_integration_batch_execute_validates_arguments(self):
+        for arguments in [
+            {"commands": []},
+            {"commands": [{"command": "echo"}] * 9},
+            {"commands": [{"command": " "}]},
+            {"commands": [{"command": "echo", "timeout": 0}]},
+            {"commands": [{"command": "echo", "timeout": True}]},
+            {"commands": [{"command": "echo", "unexpected": 1}]},
+            {"wrong": []},
+        ]:
+            result = self.integration_call("batch_execute", arguments)
+            self.assertTrue(result["isError"], arguments)
+
+    def test_integration_batch_read_reads_files(self):
+        target = Path(self.directory.name) / "target.txt"
+        target.write_text("one\ntwo\nthree\nfour\n")
+        result = self.integration_call("batch_read", {"files": [
+            {"path": str(target)},
+            {"path": str(target), "offset": 2, "limit": 2},
+            {"path": str(Path(self.directory.name) / "missing.txt")},
+        ]})
+        results = json.loads(result["content"][0]["text"])["results"]
+        self.assertEqual(results[0], {
+            "path": str(target), "line_count": 4, "content": "one\ntwo\nthree\nfour",
+        })
+        self.assertEqual(results[1]["content"], "two\nthree")
+        self.assertEqual(results[1]["line_count"], 4)
+        self.assertIn("error", results[2])
+
+    def test_integration_batch_write_writes_files(self):
+        nested = Path(self.directory.name) / "a/b/c.txt"
+        flat = Path(self.directory.name) / "flat.txt"
+        result = self.integration_call("batch_write", {"files": [
+            {"path": str(nested), "content": "héllo\n"},
+            {"path": str(flat), "content": ""},
+        ]})
+        results = json.loads(result["content"][0]["text"])["results"]
+        self.assertEqual(results[0], {"path": str(nested), "bytes": len("héllo\n".encode())})
+        self.assertEqual(nested.read_text(), "héllo\n")
+        self.assertEqual(flat.read_text(), "")
+        result = self.integration_call("batch_write", {"files": [{"path": str(flat)}]})
+        self.assertTrue(result["isError"])
+
+    def test_integration_batch_tools_do_not_need_the_bridge(self):
+        target = Path(self.directory.name) / "bridgeless.txt"
+        result = self.integration_call("batch_write", {
+            "files": [{"path": str(target), "content": "x"}],
+        }, bridge=None)
+        self.assertNotIn("isError", result)
+        result = self.integration_call("ask_user_question", {"questions": []})
+        self.assertTrue(result["isError"])
 
     def test_integration_question_round_trips_through_acp_elicitation(self):
         bridge = shim.Bridge(Path(sys.executable), [], False)
