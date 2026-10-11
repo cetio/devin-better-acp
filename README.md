@@ -124,16 +124,31 @@ devin-desktop --user-data-dir=/tmp/devin-better-acp-dev --extensions-dir=/tmp/de
 Load the extension and confirm the items match `agy`'s `/usage` panel and the
 Codex usage page for the same account.
 
-## Antigravity ACP Patch
+## Antigravity ACP Integration
 
-`bin/patch-agy-acp.py` patches the Antigravity ACP server so it assumes the
-client is Zed, which allows using other models. It rewrites the packaged
-`client_info` source and bytecode in place, preserves the PAR layout and file
-size, and leaves a timestamped `.bak` backup beside the file.
+The installer deploys the shim and its MCP modules and enables the adapted
+Devin workspace system prompt. Protocol translation lives in
+`source/antigravity/translate.py`; model mapping, question UI, permission-mode
+appearance, and tool rendering are grouped under `source/antigravity/presentation/`.
+Integration tools are defined and registered in
+`source/mcp/tools.py`, separate from the MCP server transport.
 
-Run the script directly to use it (at your own risk). Use the CPython version
-matching the ACP's packaged bytecode, and pass the PAR path if it is not at the
-default `~/.local/opt/agy-acp/current/agy_acp_server.par`.
+Structured questions use the Desktop's native multi-select and Other composer,
+without extra form pages. The integration supplies batch command execution,
+reads, unique-anchor text edits, literal text search with path/glob filters, and
+full-file writes. Use those tools for parallel commands, multi-file inspection,
+workspace searches, and exact multi-file patches; use native ACP editing for
+structural changes. Batches are bounded, and ambiguous edits leave a file
+untouched. Configured Devin MCP servers continue through ACP session setup.
+
+`source/antigravity/prompt.py` defines `SYSTEM_PROMPT`. Direct launches opt in
+with `--system-prompt`; omitting it retains the upstream prompt. Replacement
+uses `CustomSystemInstructions` in a private temporary copy of the provider PAR,
+preserving its native layout and updating both source and bytecode. The original
+executable, provider settings, and credentials are untouched. The launch copy
+requires Python matching the provider's bytecode version (CPython 3.14 for the
+verified ACP 1.3.0 build), and unsupported provider layouts fail explicitly.
+`--spoof-zed` changes the downstream client name without patching the installation.
 
 ## License
 

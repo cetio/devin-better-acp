@@ -54,15 +54,45 @@ devin-desktop --user-data-dir=/tmp/devin-better-acp-dev --extensions-dir=/tmp/de
 `source/antigravity/acp.py` is the Python 3.10+ ACP entrypoint, separate from
 read-only usage monitoring. It forwards sessions, MCP definitions, tools,
 permissions, and client capabilities without rebuilding the conversation.
-The neighboring modules separate protocol framing, message bridging, MCP
-configuration, model translation, presentation, and diagnostics; `integration.py`
-is the standalone MCP server. It bridges `ask_user_question` to the client's
-`elicitation/create` over the local socket, and serves `batch_execute`,
-`batch_read`, and `batch_write` locally so the agent can run shell commands in
-parallel and read or write several files per call. Batch output is bounded
-(64 KiB per stream, 256 KiB per read, 1 MiB per write, eight items per call),
-command timeouts kill the whole process group, and `DBA_*` environment
+`bridge.py` owns subprocess lifecycle and stdio transport; `protocol.py` owns
+bounded JSON-RPC framing. `translate.py` owns request correlation and explicit
+lifecycle hooks (`CLIENT_HOOKS` maps ACP methods to handlers). `presentation/models.py` owns picker values; `appearance.py` owns permission-mode
+labels and session titles; `questions.py` owns elicitation metadata and answer
+correlation; `tools.py` owns tool output; `reads.py` correlates host file reads.
+`mcp.py` translates Devin MCP config and integration launch entries into ACP
+session parameters. State stays with its owning domain; do not add dynamic plugin
+dispatch or compatibility wrappers.
+The installer copies nested Python packages recursively and removes the obsolete
+flat `antigravity/presentation.py` file when upgrading an earlier installation.
+
+`source/mcp/server.py` is the standalone MCP entrypoint and dispatcher.
+`source/mcp/tools.py` is the tool registration table. Implementations are split
+by responsibility across `questions.py`, `commands.py`, and `files.py`; these MCP
+modules do not import Antigravity-specific code. `source/mcp/channel.py` owns
+the private socket,
+session tokens, pending elicitation requests, cancellation, and shutdown.
+`session/new` attaches local batch tools after ACP initialization even when the
+client cannot render elicitation forms; `ask_user_question` is advertised only
+when form elicitation is supported. It crosses this channel to the client's
+`elicitation/create`. `batch_execute`, `batch_read`, `batch_edit`, `batch_search`,
+and `batch_write` execute locally. Batches accept eight items. Output is bounded
+(64 KiB per command stream, 256 KiB per read, 1 MiB per write/edit; search scans
+at most 1000 files and 16 MiB per query and returns at most 50 matches). Exact
+text edits require one match and leave that file unchanged otherwise. Execution
+drains pipes into bounded buffers, timeouts kill the process group, and `DBA_*`
 variables are not forwarded to child processes.
+MCP stdio frames are capped at 16 MiB; local interaction frames at 1 MiB.
+
+Question forms have exactly one property per question: string enums for single
+select and array enums for multi-select. Native `cognition.ai/allowOther` and
+`cognition.ai/otherOptionValue` metadata supply the Other composer; never create
+extra Other or per-option boolean properties. Partial answers and skipped
+questions are valid interaction results, not tool errors. Presentation matches
+answers to one unambiguous pending question call within the same session and
+records them before the MCP worker wakes. Tool state is keyed by session and
+call ID, cleared on terminal updates and turn completion; pending interactions
+are released on cancellation and shutdown. Tests isolate HOME and Path.home()
+so local MCP configuration never affects the offline suite.
 `--spoof-zed` changes only the downstream `initialize.clientInfo.name`;
 `--registry-entry` prints a Desktop agent entry. Its `devin-better-antigravity`
 ID opts into Desktop's Devin Local model picker. The shim maps decimal-version
@@ -74,9 +104,9 @@ ACP options cannot override those fields. Desktop may apply other `devin*`
 connector behaviors to this agent. Server arguments follow `--`.
 
 The shim identifies itself in-band as `Antigravity (DBA)`, appending a
-`+devin-shim` version suffix to the upstream version. A `/devin-shim` command is
-merged into `available_commands_update` (with `_meta.cognition.ai/category:
-"System"`) and answered locally (no model call). `--debug`/`--debug-log` writes
+`+devin-shim` version suffix to the upstream version. Upstream slash commands
+pass through unchanged; there is no local `/devin-shim` command.
+`--debug`/`--debug-log` writes
 bounded JSONL traces to `~/.local/state/devin-better-acp/antigravity-acp.jsonl`:
 files are mode `0600`, credential/header/environment fields are redacted, and
 upstream stderr is counted but never recorded as text.
@@ -134,8 +164,24 @@ not fixed by rewriting ACP session frames.
 `npm run test:acp` runs offline Python protocol tests and is included in
 `npm test`. Live Gemini checks must be explicitly authorized and use an
 isolated workspace; they are not part of automated verification. The shim
-never reads credentials or provider configuration and never patches the
-provider executable. Provider stderr is drained but not exposed.
+never reads credentials or provider configuration and never modifies the
+installed provider executable. Provider stderr is drained but not exposed.
+
+`prompt.py` contains the adapted Devin workspace `SYSTEM_PROMPT`.
+`--system-prompt` opts into full replacement through the SDK's
+`CustomSystemInstructions(text=...)`; the installer enables it by default.
+The explicitly authorized workaround creates a private temporary PAR launch
+copy and adds only `system_instructions` to the validated `common_args` seam.
+It updates source and matching bytecode ZIP slots without moving entries or
+changing file size: the native `elfzip` loader rejects appended/repacked layouts.
+The Python interpreter must match the provider's bytecode magic (currently
+CPython 3.14 for ACP 1.3.0). Unknown seams, incompatible bytecode, or insufficient
+archive slots fail explicitly; never fall back to injecting a user message.
+Original archive bytes, provider settings, credentials, and permission policies
+remain untouched. The temporary copy is cleaned on normal exit and failures.
+The original sibling harness remains the launch target. A model-free startup
+check of this copy with `--only_check_args` passed on ACP 1.3.0; this is not a
+live Gemini or Desktop UI verification.
 
 An authorized live check uses `python3 tests/integration/acp.py --run-live`
 (or adds `--registry <Desktop registry path>` to test the installed launch
