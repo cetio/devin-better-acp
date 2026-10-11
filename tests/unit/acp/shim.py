@@ -1,4 +1,7 @@
+import importlib.util
 import io
+import marshal
+import struct
 import json
 import os
 import queue
@@ -9,17 +12,25 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from source.antigravity import bridge as shim
-from source.antigravity import integration
+from source.antigravity import prompt
+from source.antigravity.presentation.questions import QuestionCalls
+from source.antigravity.presentation.tools import ToolPresentation
+from source.mcp import commands, files, questions
+from source.mcp import server as integration
+from source.mcp import tools
 from source.antigravity.debug import LOG_LINE_BYTES
+from source.antigravity.translate import VERSION
 
 SHIM = ROOT / "source/antigravity/acp.py"
-INTEGRATION = ROOT / "source/antigravity/integration.py"
+INTEGRATION = ROOT / "source/mcp/server.py"
 FIXTURE = """
 import json
 import os
@@ -101,6 +112,7 @@ class Probe:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env={**os.environ, "HOME": str(fixture.parent / "home")},
         )
         self.messages = queue.Queue()
         self.reader = threading.Thread(target=self.read_stdout, daemon=True)
@@ -147,6 +159,10 @@ class ShimTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.fixture = Path(self.directory.name) / "fake.py"
         self.fixture.write_text(FIXTURE)
+        self.home = Path(self.directory.name) / "home"
+        self.home.mkdir()
+        self.addCleanup(patch.stopall)
+        patch("pathlib.Path.home", return_value=self.home).start()
 
     def probe(self, spoof_zed=False, extra_args=()):
         ret = Probe(self.fixture, spoof_zed, extra_args)
@@ -197,44 +213,41 @@ class ShimTests(unittest.TestCase):
         servers = probe.receive()["result"]["request"]["params"]["mcpServers"]
         self.assertEqual(servers.count(client_server), 1)
 
-    def test_integration_mcp_server_requires_form_elicitation_capability(self):
+    def test_integration_batch_tools_remain_available_without_form_elicitation(self):
         bridge = shim.Bridge(Path(sys.executable), [], False)
+        self.addCleanup(bridge.translation.integration.close)
+        bridge.from_client(shim.dump({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
+        }))
         request = self.session_new(Path(self.directory.name))
-        forwarded = bridge.from_client(shim.dump(request))
-        self.assertEqual(json.loads(forwarded)["params"], request["params"])
-        self.assertIsNone(bridge.integration_server)
-
-        initialize = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {"clientCapabilities": {"elicitation": {"form": {}}}},
-        }
-        bridge.from_client(shim.dump(initialize))
         request["id"] = 2
         forwarded = json.loads(bridge.from_client(shim.dump(request)))
-        servers = forwarded["params"]["mcpServers"]
-        entry = next(server for server in servers if server["name"] == "devin-better-integration")
+        entry = next(server for server in forwarded["params"]["mcpServers"]
+                     if server["name"] == "devin-better-integration")
         environment = {item["name"]: item["value"] for item in entry["env"]}
-        self.assertEqual(entry["args"], [str(INTEGRATION), "serve"])
-        self.assertTrue(Path(environment["DBA_INTEGRATION_SOCKET"]).exists())
-        self.assertEqual(len(environment["DBA_INTEGRATION_TOKEN"]), 43)
-        bridge.from_agent(shim.dump({
-            "jsonrpc": "2.0", "id": 2, "result": {"sessionId": "fixture-session"},
-        }))
-        self.assertEqual(bridge.integration_sessions[environment["DBA_INTEGRATION_TOKEN"]], "fixture-session")
-        bridge.stop_integration_server()
+        self.assertEqual(environment, {"DBA_FORM_ELICITATION": "false"})
+        self.assertIsNone(bridge.translation.integration.server)
+        tools = integration.tool_list(allow_questions=False)
+        self.assertEqual([tool["name"] for tool in tools], [
+            "batch_edit", "batch_execute", "batch_read", "batch_search", "batch_write",
+        ])
+        bridge.from_agent(shim.dump({"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "session"}}))
+        result = integration.handle_message({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "ask_user_question", "arguments": {"questions": []}},
+        }, None, allow_questions=False)
+        self.assertEqual(result["error"]["message"], "Unknown integration tool")
 
     def test_integration_mcp_server_respects_client_name_conflicts(self):
         bridge = shim.Bridge(Path(sys.executable), [], False)
-        bridge.form_elicitation = True
+        bridge.translation.form_elicitation = True
         request = self.session_new(Path(self.directory.name), [{
             "name": "devin-better-integration", "command": "client-owned",
         }])
         request["id"] = 3
         forwarded = bridge.from_client(shim.dump(request))
         self.assertEqual(json.loads(forwarded)["params"], request["params"])
-        self.assertIsNone(bridge.integration_server)
+        self.assertIsNone(bridge.translation.integration.server)
 
     def test_integration_mcp_stdio_lists_question_tool(self):
         messages = [
@@ -252,7 +265,7 @@ class ShimTests(unittest.TestCase):
         self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "devin-better-integration")
         self.assertEqual(
             [tool["name"] for tool in responses[1]["result"]["tools"]],
-            ["ask_user_question", "batch_execute", "batch_read", "batch_write"],
+            ["ask_user_question", "batch_edit", "batch_execute", "batch_read", "batch_search", "batch_write"],
         )
 
     def integration_call(self, name, arguments, bridge=None):
@@ -335,6 +348,82 @@ class ShimTests(unittest.TestCase):
         result = self.integration_call("batch_write", {"files": [{"path": str(flat)}]})
         self.assertTrue(result["isError"])
 
+    def test_integration_batch_edit_applies_unique_patches_and_keeps_ambiguous_files_unchanged(self):
+        target = Path(self.directory.name) / "patch.txt"
+        target.write_text("alpha old\nbeta old\n")
+        ambiguous = Path(self.directory.name) / "ambiguous.txt"
+        ambiguous.write_text("old twice: old\n")
+        result = self.integration_call("batch_edit", {"files": [
+            {"path": str(target), "edits": [
+                {"oldText": "alpha old", "newText": "alpha new"},
+                {"oldText": "beta old", "newText": "beta new"},
+            ]},
+            {"path": str(ambiguous), "edits": [{"oldText": "old", "newText": "new"}]},
+        ]})
+        results = json.loads(result["content"][0]["text"])["results"]
+        self.assertEqual(results[0]["edits"], 2)
+        self.assertEqual(target.read_text(), "alpha new\nbeta new\n")
+        self.assertIn("matched 2 times", results[1]["error"])
+        self.assertEqual(ambiguous.read_text(), "old twice: old\n")
+        unchanged = target.read_text()
+        result = self.integration_call("batch_edit", {"files": [{"path": str(target), "edits": [
+            {"oldText": "alpha new", "newText": "alpha changed"},
+            {"oldText": "missing", "newText": "value"},
+        ]}]})
+        self.assertIn("error", json.loads(result["content"][0]["text"])["results"][0])
+        self.assertEqual(target.read_text(), unchanged)
+
+    def test_integration_batch_edit_validates_paths_and_operation_shapes(self):
+        target = str(Path(self.directory.name) / "target.txt")
+        for arguments in (
+            {"files": []},
+            {"files": [{"path": target, "edits": []}]},
+            {"files": [{"path": target, "edits": [{"oldText": "x", "newText": "y"}] * 17}]},
+            {"files": [{"path": target, "edits": [{"oldText": "x"}]}]},
+            {"files": [{"path": target, "edits": [{"oldText": "x", "newText": "y"}]}] * 2},
+        ):
+            self.assertTrue(self.integration_call("batch_edit", arguments)["isError"], arguments)
+
+    def test_integration_batch_search_batches_literal_queries_with_globs_and_context(self):
+        workspace = Path(self.directory.name) / "search"
+        workspace.mkdir()
+        (workspace / "first.py").write_text("start\nNeedle here\nend\nneedle again\n")
+        (workspace / "second.py").write_text("NEEDLE only\n")
+        (workspace / "notes.txt").write_text("needle hidden by glob\n")
+        result = self.integration_call("batch_search", {"searches": [
+            {"path": str(workspace), "pattern": "needle", "glob_pattern": "*.py",
+             "case_insensitive": True, "context_lines": 1},
+            {"path": str(workspace), "pattern": "needle", "glob_pattern": "*.py",
+             "output_mode": "files_with_matches"},
+            {"path": str(workspace), "pattern": "needle", "glob_pattern": "*.py",
+             "case_insensitive": True, "output_mode": "count"},
+        ]})
+        results = json.loads(result["content"][0]["text"])["results"]
+        self.assertEqual([match["line_number"] for match in results[0]["matches"]], [2, 4, 1])
+        self.assertEqual(results[0]["matches"][0]["context"], ["start", "Needle here", "end"])
+        self.assertEqual(results[1]["files"], ["first.py"])
+        self.assertEqual(results[2]["count"], 3)
+        self.assertNotIn("notes.txt", json.dumps(results))
+
+    def test_integration_batch_search_reports_bounds_and_validates_patterns(self):
+        workspace = Path(self.directory.name) / "large-search.txt"
+        workspace.write_text("match\n" * 60)
+        result = self.integration_call("batch_search", {"searches": [
+            {"path": str(workspace), "pattern": "match", "max_results": 2},
+            {"path": str(workspace.parent / "missing"), "pattern": "match"},
+        ]})
+        self.assertNotIn("isError", result, result)
+        results = json.loads(result["content"][0]["text"])["results"]
+        self.assertEqual(len(results[0]["matches"]), 2)
+        self.assertTrue(results[0]["truncated"])
+        self.assertIn("error", results[1])
+        for arguments in (
+            {"searches": []},
+            {"searches": [{"pattern": "x", "regex": True}]},
+            {"searches": [{"pattern": "x", "max_results": 51}]},
+        ):
+            self.assertTrue(self.integration_call("batch_search", arguments)["isError"], arguments)
+
     def test_integration_batch_tools_do_not_need_the_bridge(self):
         target = Path(self.directory.name) / "bridgeless.txt"
         result = self.integration_call("batch_write", {
@@ -346,7 +435,7 @@ class ShimTests(unittest.TestCase):
 
     def test_integration_question_round_trips_through_acp_elicitation(self):
         bridge = shim.Bridge(Path(sys.executable), [], False)
-        self.addCleanup(bridge.stop_integration_server)
+        self.addCleanup(bridge.translation.integration.close)
         outbound = queue.Queue()
         bridge.send_client = outbound.put
         bridge.from_client(shim.dump({
@@ -380,6 +469,16 @@ class ShimTests(unittest.TestCase):
                 "multi_select": True,
             },
         ]}
+        call = {"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "fixture-session", "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "question-tool", "kind": "other", "status": "pending",
+                "rawInput": {"arguments": arguments},
+                "_meta": {"mcp": {"server": "devin-better-integration", "tool": "ask_user_question"}},
+            },
+        }}
+        displayed = json.loads(bridge.from_agent(shim.dump(call)))["params"]["update"]
+        self.assertEqual(displayed["_meta"]["cognition.ai/inferenceToolName"], "ask_user_question")
+        self.assertTrue(displayed["_meta"]["cognition.ai/questions"][1]["allow_multiple"])
         result_queue = queue.Queue()
         integration_bridge = integration.IntegrationBridge(
             environment["DBA_INTEGRATION_SOCKET"], environment["DBA_INTEGRATION_TOKEN"],
@@ -402,28 +501,41 @@ class ShimTests(unittest.TestCase):
         self.assertEqual(elicitation["params"]["requestedSchema"]["properties"]["question_1"]["enum"], [
             "Simple", "Broad", "Other",
         ])
+        self.assertEqual(list(elicitation["params"]["requestedSchema"]["properties"]), ["question_1", "question_2"])
+        self.assertEqual(elicitation["params"]["requestedSchema"]["properties"]["question_2"]["type"], "array")
+        self.assertTrue(elicitation["params"]["_meta"]["cognition.ai/allowOther"])
         self.assertIsNone(bridge.from_client(shim.dump({
             "jsonrpc": "2.0",
             "id": elicitation["id"],
             "result": {
                 "action": "accept",
                 "content": {
-                    "question_1": "Other",
-                    "question_1_other": "Keep the current behavior",
-                    "question_2_option_1": True,
-                    "question_2_option_2": False,
-                    "question_2_other": True,
-                    "question_2_other_text": "Accessibility",
+                    "question_1": "Keep the current behavior",
+                    "question_2": ["Tests", "Accessibility"],
                 },
             },
         })))
         result = result_queue.get(timeout=3)
         self.assertEqual(result["id"], "question-call")
-        self.assertEqual(json.loads(result["result"]["content"][0]["text"]), {"answers": [
+        self.assertEqual(json.loads(result["result"]["content"][0]["text"]), {"action": "accept", "answers": [
             {"question": "Which approach should I use?", "answer": "Keep the current behavior"},
             {"question": "Which targets matter?", "answer": ["Tests", "Accessibility"]},
         ]})
         worker.join(timeout=3)
+        completed = json.loads(bridge.from_agent(shim.dump({
+            "jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": "fixture-session", "update": {
+                    "sessionUpdate": "tool_call_update", "toolCallId": "question-tool", "status": "completed",
+                },
+            },
+        })))["params"]["update"]
+        self.assertEqual(completed["_meta"]["cognition.ai/answers"], [
+            {"question_index": 0, "selected_options": [], "other_text": "Keep the current behavior"},
+            {"question_index": 1, "selected_options": ["Tests"], "other_text": "Accessibility"},
+        ])
+        self.assertEqual(completed["_meta"]["cognition.ai/originalQuestions"],
+                         displayed["_meta"]["cognition.ai/questions"])
+        self.assertNotIn(("fixture-session", "question-tool"), bridge.translation.tool_presentation.calls)
 
     def test_devin_config_prefers_mcp_config_over_legacy_config_json(self):
         probe = self.probe(extra_args=["--devin-config"])
@@ -558,7 +670,7 @@ class ShimTests(unittest.TestCase):
         del request["params"]["clientInfo"]
         probe.send(request)
         info = probe.receive()["result"]["request"]["params"]["clientInfo"]
-        self.assertEqual(info, {"name": "zed", "version": shim.VERSION})
+        self.assertEqual(info, {"name": "zed", "version": VERSION})
 
     def test_cwd_mcp_servers_and_extensions_are_unchanged(self):
         probe = self.probe(True)
@@ -839,7 +951,7 @@ class ShimTests(unittest.TestCase):
         info = probe.receive()["result"]["agentInfo"]
         self.assertEqual(info["name"], "fixture-agent")
         self.assertEqual(info["title"], "Antigravity (DBA)")
-        self.assertTrue(info["version"].endswith(f"+devin-shim-{shim.VERSION}"))
+        self.assertTrue(info["version"].endswith(f"+devin-shim-{VERSION}"))
 
     def test_mcp_config_path_is_advertised_only_with_devin_config(self):
         plain = self.probe()
@@ -850,7 +962,7 @@ class ShimTests(unittest.TestCase):
         path = merged.receive()["result"]["_meta"]["mcpConfigPath"]
         self.assertTrue(path.endswith(".config/devin/mcp_config.json"))
 
-    def test_shim_command_is_advertised_and_answered_locally(self):
+    def test_available_commands_are_not_augmented(self):
         probe = self.probe()
         events = [{
             "jsonrpc": "2.0",
@@ -866,9 +978,7 @@ class ShimTests(unittest.TestCase):
         probe.send({"jsonrpc": "2.0", "id": 2, "method": "test/events", "params": events})
         update = probe.receive()["params"]["update"]
         names = [command["name"] for command in update["availableCommands"]]
-        self.assertEqual(names, ["existing", shim.SHIM_COMMAND])
-        injected = update["availableCommands"][-1]
-        self.assertEqual(injected["_meta"], {"cognition.ai/category": "System"})
+        self.assertEqual(names, ["existing"])
         self.assertEqual(probe.receive(), {"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
         probe.send({
             "jsonrpc": "2.0",
@@ -876,14 +986,13 @@ class ShimTests(unittest.TestCase):
             "method": "session/prompt",
             "params": {
                 "sessionId": "fixture",
-                "prompt": [{"type": "text", "text": f"/{shim.SHIM_COMMAND}"}],
+                "prompt": [{"type": "text", "text": "/devin-shim"}],
             },
         })
         chunk = probe.receive()
         self.assertEqual(chunk["method"], "session/update")
-        self.assertEqual(chunk["params"]["update"]["sessionUpdate"], "agent_message_chunk")
-        self.assertIn("Antigravity (DBA) shim is active", chunk["params"]["update"]["content"]["text"])
-        self.assertEqual(probe.receive(), {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}})
+        self.assertEqual(chunk["params"]["update"]["sessionUpdate"], "session_info_update")
+        self.assertEqual(probe.receive()["result"]["request"]["params"]["prompt"][0]["text"], "/devin-shim")
         probe.send({"jsonrpc": "2.0", "id": 4, "method": "test/echo", "params": {}})
         echoed = probe.receive()["result"]["request"]
         self.assertEqual(echoed["id"], 4)
@@ -1040,12 +1149,12 @@ class ShimTests(unittest.TestCase):
         self.assertEqual(len(bridge.client_out.getvalue().splitlines()), 1)
         response = shim.dump({"jsonrpc": "2.0", "id": "turn", "result": {"stopReason": "end_turn"}})
         self.assertEqual(bridge.from_agent(response), response)
-        self.assertNotIn(("fixture", "/fixture/file.txt"), bridge.read_calls)
-        self.assertNotIn("read", bridge.read_requests)
+        self.assertNotIn(("fixture", "/fixture/file.txt"), bridge.translation.read_progress.calls)
+        self.assertNotIn("read", bridge.translation.read_progress.requests)
 
     def test_devin_picker_model_ids_round_trip_to_provider_values(self):
         bridge = shim.Bridge(Path(sys.executable), [], False)
-        bridge.pending["new-session"] = "session/new"
+        bridge.translation.pending["new-session"] = ("session/new", None)
         response = {
             "jsonrpc": "2.0",
             "id": "new-session",
@@ -1277,6 +1386,204 @@ class ShimTests(unittest.TestCase):
         self.assertIn("--spoof-zed", launch["args"])
         self.assertEqual(launch["args"][-2:], ["--", "--uid="])
         self.assertEqual(completed.stderr, b"")
+
+    def questions(self):
+        return {"questions": [{
+            "question": "Choose an approach", "header": "Approach",
+            "options": [{"label": "Small"}, {"label": "Broad"}],
+        }]}
+
+    def test_question_decline_preserves_partial_answers_without_a_tool_error(self):
+        result = questions.ask_user_question(self.questions(), lambda operation, parameters: {
+            "action": "decline", "_meta": {"cognition.ai/partialContent": {"question_1": "Small"}},
+        })
+        self.assertNotIn("isError", result)
+        self.assertEqual(json.loads(result["content"][0]["text"]), {
+            "action": "decline", "answers": [{"question": "Choose an approach", "answer": "Small"}],
+        })
+        result = questions.ask_user_question(self.questions(), lambda operation, parameters: {"action": "cancel"})
+        self.assertTrue(json.loads(result["content"][0]["text"])["answers"][0]["skipped"])
+
+    def test_question_rendering_is_session_scoped_and_decline_renders_skipped(self):
+        question_calls = QuestionCalls()
+        appearance = ToolPresentation(question_calls)
+        for session_id, kind in (("one", "execute"), ("two", "read")):
+            appearance.update(session_id, {"toolCallId": "shared", "sessionUpdate": "tool_call", "kind": kind})
+        update = {"toolCallId": "shared", "sessionUpdate": "tool_call_update", "status": "completed",
+                  "rawOutput": {"combinedOutput": "one", "exitCode": 0}}
+        appearance.update("two", update)
+        self.assertNotIn("terminal_output", update["_meta"])
+        self.assertEqual(update["_meta"]["cognition.ai/inferenceToolName"], "read")
+        update = {"toolCallId": "shared", "sessionUpdate": "tool_call_update", "status": "completed"}
+        appearance.update("one", update)
+        self.assertEqual(update["_meta"]["cognition.ai/inferenceToolName"], "exec")
+        call = {"toolCallId": "question", "sessionUpdate": "tool_call", "kind": "other", "status": "pending",
+                "rawInput": self.questions(),
+                "_meta": {"mcp": {"server": "devin-better-integration", "tool": "ask_user_question"}}}
+        appearance.update("one", call)
+        form, _ = questions.build_question_form(self.questions())
+        question_calls.record_answers("one", form, {"action": "cancel"})
+        completed = {"toolCallId": "question", "sessionUpdate": "tool_call_update", "status": "failed"}
+        appearance.update("one", completed)
+        self.assertEqual(completed["_meta"]["cognition.ai/answers"], [])
+        self.assertEqual(completed["_meta"]["cognition.ai/questions"][0]["options"], ["Small", "Broad"])
+        self.assertEqual(completed["title"], "mcp__devin-better-integration__ask_user_question")
+
+    def test_question_answers_match_distinct_parallel_calls(self):
+        question_calls = QuestionCalls()
+        appearance = ToolPresentation(question_calls)
+        for tool_id, text in (("first", "First question"), ("second", "Second question")):
+            arguments = self.questions()
+            arguments["questions"][0]["question"] = text
+            appearance.update("session", {
+                "toolCallId": tool_id, "sessionUpdate": "tool_call", "kind": "other", "rawInput": arguments,
+                "_meta": {"mcp": {"server": "devin-better-integration", "tool": "ask_user_question"}},
+            })
+            form, _ = questions.build_question_form(arguments)
+            question_calls.record_answers(
+                "session", form, {"action": "accept", "content": {"question_1": tool_id}},
+            )
+        for tool_id in ("second", "first"):
+            completed = {"toolCallId": tool_id, "sessionUpdate": "tool_call_update", "status": "completed"}
+            appearance.update("session", completed)
+            self.assertEqual(completed["_meta"]["cognition.ai/answers"][0]["other_text"], tool_id)
+        self.assertFalse(appearance.calls)
+
+    def test_integration_cancel_and_shutdown_unblock_pending_questions(self):
+        for shutdown in (False, True):
+            with self.subTest(shutdown=shutdown):
+                bridge = shim.Bridge(Path(sys.executable), [])
+                channel = bridge.translation.integration
+                self.addCleanup(channel.close)
+                channel.sessions["token"] = "session"
+                outbound = queue.Queue()
+                bridge.send_client = outbound.put
+                results = queue.Queue()
+                form, _ = questions.build_question_form(self.questions())
+                worker = threading.Thread(target=lambda: results.put(channel.handle_request({
+                    "token": "token", "operation": "elicitation/create", "params": form,
+                })), daemon=True)
+                worker.start()
+                outbound.get(timeout=3)
+                if shutdown:
+                    channel.close()
+                else:
+                    bridge.from_client(shim.dump({"jsonrpc": "2.0", "method": "session/cancel",
+                                                 "params": {"sessionId": "session"}}))
+                result = results.get(timeout=3)
+                self.assertTrue("error" in result if shutdown else result["result"]["action"] == "cancel")
+                worker.join(timeout=3)
+                self.assertFalse(channel.requests)
+
+    def test_integration_rejects_malformed_metadata_and_rotates_session_tokens(self):
+        bridge = shim.Bridge(Path(sys.executable), [])
+        channel = bridge.translation.integration
+        channel.sessions["old"] = "session"
+        channel.session_tokens["session"] = "old"
+        channel.pending_sessions["load"] = ("new", "session")
+        channel.bind("load", None)
+        self.assertNotIn("old", channel.sessions)
+        self.assertEqual(channel.sessions["new"], "session")
+        form, _ = questions.build_question_form(self.questions())
+        form["_meta"] = []
+        self.assertIn("error", channel.handle_request({
+            "token": "new", "operation": "elicitation/create", "params": form,
+        }))
+
+    def test_batch_execute_bounds_output_and_scrubs_integration_environment(self):
+        command = f'{sys.executable} -c "import os; print(\'x\' * 200000); '
+        command += 'print(os.environ.get(\'DBA_TEST\', \'absent\'))"'
+        with patch.dict(os.environ, {"DBA_TEST": "private"}):
+            result = commands.run_command({"command": command, "cwd": None, "timeout": 3})
+        self.assertTrue(result["stdout"].startswith("["))
+        self.assertLess(len(result["stdout"]), commands.MAX_STREAM_BYTES + 100)
+        self.assertTrue(result["stdout"].endswith("absent\n"))
+
+    def test_prompt_launch_copy_replaces_system_instructions_and_preserves_original(self):
+        server = Path(self.directory.name) / "server.par"
+        source = '''
+class Instructions:
+    def __init__(self, text):
+        self.text = text
+
+class sdk_types_module:
+    CustomSystemInstructions = Instructions
+
+def config():
+    common_args: dict = {
+        "workspaces": ["workspace"],
+        "policies": ["keep"],
+        "mcp_servers": [],
+    }
+    return common_args
+'''
+        prefix = b"provider native prefix\n"
+        source += "\n" * 10000
+        bytecode = importlib.util.MAGIC_NUMBER + struct.pack("<3I", 0, 0, len(source))
+        bytecode += marshal.dumps(compile(source, prompt.SERVER_MODULE, "exec"))
+        bytecode += bytes(10000)
+        server.write_bytes(prefix)
+        with zipfile.ZipFile(server, "a") as archive:
+            archive.writestr(prompt.SERVER_MODULE, source)
+            archive.writestr(prompt.SERVER_MODULE[:-3] + ".pyc", bytecode)
+            archive.writestr("unchanged", b"other provider content")
+        original = server.read_bytes()
+        with prompt.launch_copy(server) as launched:
+            self.assertEqual(launched.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(launched.read_bytes()[:len(prefix)], prefix)
+            with zipfile.ZipFile(launched) as archive:
+                self.assertEqual(launched.stat().st_size, server.stat().st_size)
+                self.assertEqual(archive.read("unchanged"), b"other provider content")
+                namespace = {}
+                exec(archive.read(prompt.SERVER_MODULE), namespace)
+                bytecode_namespace = {}
+                exec(marshal.loads(archive.read(prompt.SERVER_MODULE[:-3] + ".pyc")[16:]), bytecode_namespace)
+                self.assertEqual(bytecode_namespace["config"]()["system_instructions"].text, prompt.SYSTEM_PROMPT)
+            configuration = namespace["config"]()
+            self.assertEqual(configuration["system_instructions"].text, prompt.SYSTEM_PROMPT)
+            self.assertEqual(configuration["policies"], ["keep"])
+            self.assertEqual(configuration["workspaces"], ["workspace"])
+            self.assertEqual(server.read_bytes(), original)
+        self.assertFalse(launched.exists())
+        self.assertEqual(server.read_bytes(), original)
+        for invalid in ("common_args = {}", source + source, source.replace('"policies"', '"unexpected"')):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                prompt.replace_system_instructions(invalid)
+
+    def test_prompt_launch_rejects_incompatible_bytecode_and_insufficient_slots(self):
+        source = 'common_args: dict = {"workspaces": [], "policies": [], "mcp_servers": []}\n'
+        for bytecode in (None, b"incompatible bytecode header"):
+            server = Path(self.directory.name) / "unsupported.par"
+            with zipfile.ZipFile(server, "w") as archive:
+                archive.writestr(prompt.SERVER_MODULE, source)
+                if bytecode is not None:
+                    archive.writestr(prompt.SERVER_MODULE[:-3] + ".pyc", bytecode)
+            original = server.read_bytes()
+            with self.subTest(bytecode=bytecode), self.assertRaises(ValueError):
+                with prompt.launch_copy(server):
+                    self.fail("unsupported archive launched")
+            self.assertEqual(server.read_bytes(), original)
+
+    def test_mcp_stdio_accepts_full_sized_batch_writes(self):
+        targets = [Path(self.directory.name) / f"large-{index}.txt" for index in range(2)]
+        request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+            "name": "batch_write", "arguments": {"files": [
+                {"path": str(target), "content": "x" * files.MAX_WRITE_BYTES} for target in targets
+            ]},
+        }}
+        result = subprocess.run([sys.executable, str(INTEGRATION), "serve"],
+                                input=shim.dump(request), capture_output=True, timeout=8, check=True)
+        self.assertNotIn("isError", json.loads(result.stdout)["result"])
+        self.assertTrue(all(target.stat().st_size == files.MAX_WRITE_BYTES for target in targets))
+
+    def test_prompt_override_fails_explicitly_for_unsupported_servers(self):
+        probe = self.probe(extra_args=["--system-prompt"])
+        self.assertEqual(probe.finish(), 1)
+        self.assertIn(b"Unsupported Antigravity archive", probe.stderr)
+        completed = subprocess.run([sys.executable, str(SHIM), "--registry-entry", "--system-prompt"],
+                                   capture_output=True, check=True)
+        launch = next(iter(json.loads(completed.stdout)["distribution"]["binary"].values()))
+        self.assertIn("--system-prompt", launch["args"])
 
 
 if __name__ == "__main__":
