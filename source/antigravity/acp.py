@@ -16,6 +16,28 @@ from source.antigravity.translate import VERSION
 
 DEFAULT_SERVER = Path.home() / ".local/opt/agy-acp/current/agy_acp_server.par"
 DEFAULT_ICON_URL = "https://cdn.jsdelivr.net/gh/cetio/devin-better-acp@main/images/antigravity-acp.svg"
+MAX_EXTENSION_CONFIG_BYTES = 4096
+EXTENSION_CONFIG_KEYS = {"spoofZed", "devinMcp", "systemPrompt"}
+
+
+def load_extension_config(path: Path) -> dict:
+    if not path.is_absolute():
+        raise ValueError("Antigravity launch settings path must be absolute.")
+    try:
+        content = path.read_bytes()
+    except OSError:
+        raise ValueError("Antigravity launch settings could not be read.") from None
+    if len(content) > MAX_EXTENSION_CONFIG_BYTES:
+        raise ValueError("Antigravity launch settings exceed the size limit.")
+    try:
+        settings = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("Antigravity launch settings contain invalid JSON.") from None
+    if not isinstance(settings, dict) or set(settings) != EXTENSION_CONFIG_KEYS:
+        raise ValueError("Antigravity launch settings have an invalid structure.")
+    if any(type(settings[key]) is not bool for key in EXTENSION_CONFIG_KEYS):
+        raise ValueError("Antigravity launch settings must contain boolean values.")
+    return settings
 
 
 def registry_entry(
@@ -25,6 +47,7 @@ def registry_entry(
     icon_url: str,
     devin_config: bool,
     system_prompt: bool,
+    extension_config: Path | None = None,
 ) -> dict:
     system = {"darwin": "darwin", "linux": "linux", "win32": "windows"}.get(sys.platform)
     architecture = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}.get(
@@ -33,12 +56,17 @@ def registry_entry(
     if system is None or architecture is None:
         raise ValueError("this platform is not supported by the ACP registry")
     arguments = [str(Path(__file__).resolve()), "--server", str(server)]
-    if spoof_zed:
-        arguments.append("--spoof-zed")
-    if devin_config:
-        arguments.append("--devin-config")
-    if system_prompt:
-        arguments.append("--system-prompt")
+    if extension_config is not None:
+        if not extension_config.is_absolute():
+            raise ValueError("Antigravity launch settings path must be absolute.")
+        arguments.extend(["--extension-config", str(extension_config)])
+    else:
+        if spoof_zed:
+            arguments.append("--spoof-zed")
+        if devin_config:
+            arguments.append("--devin-config")
+        if system_prompt:
+            arguments.append("--system-prompt")
     if server_args:
         arguments.extend(["--", *server_args])
     return {
@@ -80,6 +108,7 @@ def main() -> int:
         action="store_true",
         help="replace upstream instructions using the adapted prompt in a temporary PAR launch copy",
     )
+    parser.add_argument("--extension-config", type=Path, help="extension-owned launch settings JSON")
     parser.add_argument(
         "--registry-entry",
         action="store_true",
@@ -97,6 +126,10 @@ def main() -> int:
     server_args = arguments.server_args
     if server_args[:1] == ["--"]:
         server_args = server_args[1:]
+    if arguments.extension_config is not None and (
+        arguments.spoof_zed or arguments.devin_config or arguments.system_prompt
+    ):
+        parser.error("--extension-config cannot be combined with legacy launch flags.")
     if arguments.registry_entry:
         try:
             print(json.dumps(registry_entry(
@@ -106,16 +139,28 @@ def main() -> int:
                 arguments.icon_url,
                 arguments.devin_config,
                 arguments.system_prompt,
+                arguments.extension_config,
             ), indent=2))
         except ValueError as error:
             parser.error(str(error))
         return 0
+    if arguments.extension_config is None:
+        settings = {
+            "spoofZed": arguments.spoof_zed,
+            "devinMcp": arguments.devin_config,
+            "systemPrompt": arguments.system_prompt,
+        }
+    else:
+        try:
+            settings = load_extension_config(arguments.extension_config)
+        except ValueError as error:
+            parser.error(str(error))
     return Bridge(
         server.resolve(),
         server_args,
-        arguments.spoof_zed,
-        arguments.devin_config,
-        arguments.system_prompt,
+        settings["spoofZed"],
+        settings["devinMcp"],
+        settings["systemPrompt"],
     ).run()
 
 

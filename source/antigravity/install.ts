@@ -1,5 +1,6 @@
-import { asRecord, asString } from "../envelope";
-import { runCli } from "../process/runner";
+import { asRecord, asString } from "../parse";
+import { runCli, CliFailure } from "../cli";
+import { antigravityLaunchConfigPath } from "./config";
 
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
@@ -15,11 +16,13 @@ export type AntigravityInstallPaths = {
     shimPath: string;
     serverPath: string;
     registryPath: string;
+    launchConfigPath: string;
 };
 
 export type AntigravityInstallResult = {
     installDirectory: string;
     registryPath: string;
+    launchConfigPath: string;
 };
 
 export function antigravityInstallPaths(
@@ -38,6 +41,7 @@ export function antigravityInstallPaths(
             environment.AGY_ACP_SERVER_PATH || join(home, ".local", "opt", "agy-acp", "current", "agy_acp_server.par"),
         ),
         registryPath: resolve(environment.DEVIN_ACP_REGISTRY_PATH || join(home, ".windsurf", "acp", "registry.json")),
+        launchConfigPath: antigravityLaunchConfigPath(home),
     };
 }
 
@@ -105,9 +109,8 @@ export async function installAntigravity(
             "--registry-entry",
             "--server",
             paths.serverPath,
-            "--spoof-zed",
-            "--devin-config",
-            "--system-prompt",
+            "--extension-config",
+            paths.launchConfigPath,
             "--",
             "--uid=",
         ],
@@ -115,11 +118,11 @@ export async function installAntigravity(
         timeoutMs: ENTRY_TIMEOUT_MS,
         maxStdoutBytes: MAX_ENTRY_BYTES,
     });
-    if (generated.exit.spawnError !== undefined)
+    if (generated.failure === CliFailure.Start)
         throw new Error(`Python executable was not found: ${python}`);
-    if (generated.exit.timedOut)
+    if (generated.failure === CliFailure.Timeout)
         throw new Error("Generating the ACP registry entry timed out.");
-    if (generated.exit.outputLimitExceeded || generated.exit.code !== 0)
+    if (generated.failure !== undefined || generated.code !== 0)
         throw new Error("Could not generate the ACP registry entry.");
 
     let generatedEntry: unknown;
@@ -136,7 +139,11 @@ export async function installAntigravity(
 
     await installModules(sourceRoot, paths.installDirectory);
     await writeRegistry(paths.registryPath, registryText);
-    return { installDirectory: paths.installDirectory, registryPath: paths.registryPath };
+    return {
+        installDirectory: paths.installDirectory,
+        registryPath: paths.registryPath,
+        launchConfigPath: paths.launchConfigPath,
+    };
 }
 
 async function installModules(sourceRoot: string, installDirectory: string): Promise<void>
