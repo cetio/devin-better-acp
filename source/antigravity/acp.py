@@ -10,8 +10,13 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from source.antigravity.bridge import Bridge
-from source.antigravity.constants import AGENT_TITLE, DEFAULT_DEBUG_LOG, DEFAULT_ICON_URL, DEFAULT_SERVER, VERSION
-from source.antigravity.debug import DebugLog
+from source.antigravity.debug import DEFAULT_DEBUG_LOG, DebugLog
+from source.antigravity.presentation.appearance import AGENT_TITLE
+from source.antigravity.translate import VERSION
+
+
+DEFAULT_SERVER = Path.home() / ".local/opt/agy-acp/current/agy_acp_server.par"
+DEFAULT_ICON_URL = "https://cdn.jsdelivr.net/gh/cetio/devin-better-acp@main/images/antigravity-acp.svg"
 
 
 def registry_entry(
@@ -21,6 +26,7 @@ def registry_entry(
     icon_url: str,
     debug_log: Path | None,
     devin_config: bool,
+    system_prompt: bool,
 ) -> dict:
     system = {"darwin": "darwin", "linux": "linux", "win32": "windows"}.get(sys.platform)
     architecture = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}.get(
@@ -37,6 +43,8 @@ def registry_entry(
             arguments.extend(["--debug-log", str(debug_log)])
     if devin_config:
         arguments.append("--devin-config")
+    if system_prompt:
+        arguments.append("--system-prompt")
     if server_args:
         arguments.extend(["--", *server_args])
     return {
@@ -84,6 +92,11 @@ def main() -> int:
         help="merge MCP servers from .devin and ~/.config/devin into session/new and session/load",
     )
     parser.add_argument(
+        "--system-prompt",
+        action="store_true",
+        help="replace upstream instructions using the adapted prompt in a temporary PAR launch copy",
+    )
+    parser.add_argument(
         "--registry-entry",
         action="store_true",
         help="print a Desktop registry entry",
@@ -112,6 +125,7 @@ def main() -> int:
                 arguments.icon_url,
                 debug_log,
                 arguments.devin_config,
+                arguments.system_prompt,
             ), indent=2))
         except ValueError as error:
             parser.error(str(error))
@@ -123,7 +137,14 @@ def main() -> int:
         except OSError as error:
             print(f"Antigravity ACP shim: cannot open debug log (errno {error.errno}).", file=sys.stderr)
             return 1
-    return Bridge(server.resolve(), server_args, arguments.spoof_zed, debug, arguments.devin_config).run()
+    return Bridge(
+        server.resolve(),
+        server_args,
+        arguments.spoof_zed,
+        debug,
+        arguments.devin_config,
+        arguments.system_prompt,
+    ).run()
 
 
 if __name__ == "__main__":

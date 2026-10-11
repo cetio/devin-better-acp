@@ -92,7 +92,7 @@ export async function installAntigravity(
     const paths = antigravityInstallPaths(environment, homeDirectory);
     const sourceRoot = join(extensionRoot, "source");
     const sourceShim = join(sourceRoot, "antigravity", "acp.py");
-    const sourceIntegration = join(sourceRoot, "antigravity", "integration.py");
+    const sourceIntegration = join(sourceRoot, "mcp", "server.py");
     await requireFile(sourceShim, "Antigravity ACP shim");
     await requireFile(sourceIntegration, "Antigravity integration server");
     await requireFile(paths.serverPath, "Antigravity ACP server");
@@ -108,6 +108,7 @@ export async function installAntigravity(
             "--spoof-zed",
             "--debug",
             "--devin-config",
+            "--system-prompt",
             "--",
             "--uid=",
         ],
@@ -141,17 +142,33 @@ export async function installAntigravity(
 
 async function installModules(sourceRoot: string, installDirectory: string): Promise<void>
 {
-    const sourceAntigravity = join(sourceRoot, "antigravity");
-    const installAntigravity = join(installDirectory, "source", "antigravity");
-    const moduleNames = (await readdir(sourceAntigravity, { withFileTypes: true }))
-        .filter((entry) => entry.isFile() && entry.name.endsWith(".py"))
-        .map((entry) => entry.name);
-    await mkdir(installAntigravity, { recursive: true });
-    await copyModule(join(sourceRoot, "__init__.py"), join(installDirectory, "source", "__init__.py"), 0o644);
-    for (const moduleName of moduleNames)
+    const installedRoot = join(installDirectory, "source");
+    await mkdir(installedRoot, { recursive: true });
+    await copyModule(join(sourceRoot, "__init__.py"), join(installedRoot, "__init__.py"), 0o644);
+    const obsoletePresentation = join(installedRoot, "antigravity", "presentation.py");
+    await unlink(obsoletePresentation).catch((error: unknown) =>
     {
-        const mode = moduleName === "acp.py" || moduleName === "integration.py" ? 0o755 : 0o644;
-        await copyModule(join(sourceAntigravity, moduleName), join(installAntigravity, moduleName), mode);
+        if (!isMissingFile(error))
+            throw error;
+    });
+    for (const domain of ["antigravity", "mcp"])
+        await copyModules(join(sourceRoot, domain), join(installedRoot, domain));
+}
+
+async function copyModules(sourceDirectory: string, targetDirectory: string): Promise<void>
+{
+    await mkdir(targetDirectory, { recursive: true });
+    for (const entry of await readdir(sourceDirectory, { withFileTypes: true }))
+    {
+        const sourcePath = join(sourceDirectory, entry.name);
+        const targetPath = join(targetDirectory, entry.name);
+        if (entry.isDirectory())
+            await copyModules(sourcePath, targetPath);
+        else if (entry.isFile() && entry.name.endsWith(".py"))
+        {
+            const mode = entry.name === "acp.py" || entry.name === "server.py" ? 0o755 : 0o644;
+            await copyModule(sourcePath, targetPath, mode);
+        }
     }
 }
 

@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 
+DEFAULT_DEBUG_LOG = Path.home() / ".local/state/devin-better-acp/antigravity-acp.jsonl"
 LOG_LINE_BYTES = 256 * 1024
 
 
