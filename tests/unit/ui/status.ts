@@ -1,5 +1,13 @@
 import { ConnectionState } from "../../../source/allowance/model";
-import { testAntigravityStatus, testPool, testSnapshot, testStatus, testWindow, TEST_CONTEXT, TEST_NOW } from "../../support";
+import {
+    testAntigravityStatus,
+    testPool,
+    testSnapshot,
+    testStatus,
+    testWindow,
+    TEST_CONTEXT,
+    TEST_NOW,
+} from "../../support";
 import type { UsageState } from "../../../source/usage";
 
 import assert from "node:assert/strict";
@@ -122,7 +130,11 @@ test("loading, unavailable, and disabled statuses stay honest", () =>
 
 test("stale values stay labelled and keep their tone", () =>
 {
-    const display = statusDisplay(testStatus({ state: ConnectionState.Stale, message: "offline" }), "codex", TEST_CONTEXT);
+    const display = statusDisplay(
+        testStatus({ state: ConnectionState.Stale, message: "offline" }),
+        "codex",
+        TEST_CONTEXT,
+    );
     assert.equal(display.text, "Codex");
     assert.equal(display.tone, "normal");
     assert.ok(display.tooltip.includes("Last known values"));
@@ -146,7 +158,11 @@ test("Codex hovers summarise every window in one line", () =>
 
 test("stale hovers keep the summary and explain the staleness", () =>
 {
-    const display = statusDisplay(testStatus({ state: ConnectionState.Stale, message: "offline" }), "codex", TEST_CONTEXT);
+    const display = statusDisplay(
+        testStatus({ state: ConnectionState.Stale, message: "offline" }),
+        "codex",
+        TEST_CONTEXT,
+    );
     assert.ok(display.tooltip.startsWith("5h: 3% quota used · Weekly: 16% quota used"));
     assert.ok(display.tooltip.includes("Last known values"));
     assert.ok(display.tooltip.includes("offline"));
