@@ -66,6 +66,11 @@
         "command": "devinBetterACP.openChatGptUsage",
         "title": "Open ChatGPT Usage Page",
         "category": "Devin Better ACP"
+      },
+      {
+        "command": "devinBetterACP.installAntigravity",
+        "title": "Install Devin Better Antigravity",
+        "category": "Devin Better ACP"
       }
     ],
     "configuration": {
@@ -118,17 +123,11 @@
           "scope": "application",
           "description": "Show the Codex status-bar item."
         },
-        "devinBetterACP.statusBar.showGemini": {
+        "devinBetterACP.statusBar.showAntigravity": {
           "type": "boolean",
           "default": true,
           "scope": "application",
-          "description": "Show the Antigravity Gemini status-bar item."
-        },
-        "devinBetterACP.statusBar.showOther": {
-          "type": "boolean",
-          "default": true,
-          "scope": "application",
-          "description": "Show the Antigravity Other Models status-bar item."
+          "description": "Show the Antigravity status-bar item."
         }
       }
     }
@@ -136,7 +135,8 @@
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test \"dist/tests/unit/**/*.js\" && npm run test:acp",
+    "test": "npm run build && npm run test:unit && npm run test:acp",
+    "test:unit": "node --test \"dist/tests/unit/{*.js,allowance/*.js,antigravity/*.js,codex/*.js,process/*.js,ui/*.js}\"",
     "test:acp": "python3 -m unittest discover -s tests/unit/acp -p '*.py'",
     "test:integration": "npm run build && node .devin/runintegration.mjs",
     "package:files": "vsce ls --no-dependencies --ignoreFile .devin/packageignore",

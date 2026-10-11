@@ -8,6 +8,9 @@ source/**
 !source/antigravity/*.py
 tests/**
 dist/tests/**
+dist/source/monitor.js
+dist/source/picker/**
+dist/source/status/**
 bin/**
 node_modules/**
 *.vsix
