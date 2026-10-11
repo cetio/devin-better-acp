@@ -1,89 +1,33 @@
-import { runCli } from "../process/runner";
-import { compareWindows } from "../allowance/format";
-import { ConnectionState, UsagePool, UsageWindow } from "../allowance/model";
-import {
-    AdapterError,
-    AdapterResult,
-    ProviderAdapter,
-    ProviderInvocation,
-    classifyExit,
-    probeVersion,
-} from "../adapter";
-import { asNumber, asRecord, asString } from "../envelope";
+import { UsageError, UsagePool, UsageReport, UsageWindow, ConnectionState } from "../usage";
+import { asNumber, asRecord, asString, parseDurationMinutes } from "../parse";
 
-const MAX_STDOUT_BYTES = 1024 * 1024;
 const TOKEN_COUNTER_KEYS = ["input_tokens", "output_tokens", "thinking_tokens", "cache_read_tokens", "total_tokens"];
 const SIGN_IN_MESSAGE = "Antigravity CLI is not signed in. Run `agy`, sign in, then retry.";
+const TOKEN_STOP_MESSAGE = "The Antigravity usage probe consumed model tokens; automatic polling is stopped.";
+const EXPECTED_POOL_IDS = ["gemini", "other"];
 
-export function createAntigravityAdapter(invocation: ProviderInvocation): ProviderAdapter
-{
-    return {
-        id: "antigravity",
-        label: "Antigravity",
-        command: invocation.command,
-        readArgs: invocation.readArgs,
-        minimumVersion: { major: 1, minor: 2, patch: 16 },
-        version: (signal) => probeVersion(invocation, signal),
-        read: (signal) => readUsage(invocation, signal),
-    };
-}
-
-async function readUsage(invocation: ProviderInvocation, signal: AbortSignal): Promise<AdapterResult>
-{
-    const result = await runCli({
-        command: invocation.command,
-        args: invocation.readArgs,
-        cwd: invocation.cwd,
-        timeoutMs: invocation.timeoutMs,
-        maxStdoutBytes: MAX_STDOUT_BYTES,
-    }, signal);
-    if (result.exit.spawnError !== undefined)
-        throw classifyExit(result.exit, "Antigravity CLI");
-    if (result.exit.timedOut || result.exit.aborted || result.exit.code !== 0)
-    {
-        if (/auth|login|credential|signed in/i.test(result.stderr))
-            throw new AdapterError(ConnectionState.AuthRequired, SIGN_IN_MESSAGE);
-        throw classifyExit(result.exit, "Antigravity CLI");
-    }
-    let payload: unknown;
-    try
-    {
-        payload = JSON.parse(result.stdout);
-    }
-    catch
-    {
-        throw new AdapterError(ConnectionState.Unsupported, "Antigravity CLI returned an unreadable usage report.");
-    }
-    return parseUsageReport(payload, Date.now());
-}
-
-export function parseUsageReport(payload: unknown, observedAt: number): AdapterResult
+export function parseUsageReport(payload: unknown): UsageReport
 {
     const root = asRecord(payload);
     if (root === undefined)
-        throw new AdapterError(ConnectionState.Unsupported, "Antigravity CLI returned an unreadable usage report.");
+        throw new UsageError(ConnectionState.Unsupported, "Antigravity CLI returned an unreadable usage report.");
+    assertNoTokensConsumed(root.usage);
     const status = asString(root.status);
     if (status !== undefined && status !== "SUCCESS")
     {
         const error = asString(root.error);
         if (error !== undefined && /auth|login|credential|signed in/i.test(error))
-            throw new AdapterError(ConnectionState.AuthRequired, SIGN_IN_MESSAGE);
-        const failure = `Antigravity usage command failed (${status}).`;
-        const detail = error === undefined ? failure : `Antigravity usage command failed: ${error}`;
-        throw new AdapterError(ConnectionState.Unavailable, detail);
+            throw new UsageError(ConnectionState.AuthRequired, SIGN_IN_MESSAGE);
+        throw new UsageError(ConnectionState.Unavailable, "Antigravity usage command failed.");
     }
     const command = asRecord(root.command);
-    const commandName = command === undefined ? undefined : asString(command.name);
-    if (commandName !== "usage")
-    {
-        const message = "Antigravity CLI did not answer the usage command. Update the CLI, then retry.";
-        throw new AdapterError(ConnectionState.Unsupported, message);
-    }
-    assertNoTokensConsumed(root.usage);
+    if (asString(command?.name) !== "usage")
+        throw new UsageError(ConnectionState.Unsupported, "Antigravity CLI did not answer the usage command. Update the CLI, then retry.");
     const data = asRecord(command?.data) ?? asRecord(root.data);
     const groups = data === undefined || !Array.isArray(data.groups) ? [] : data.groups;
     if (groups.length === 0)
-        throw new AdapterError(ConnectionState.Unavailable, "Antigravity reported no quota groups.");
+        throw new UsageError(ConnectionState.Unavailable, "Antigravity reported no quota groups.");
+
     const pools = new Map<string, UsagePool>();
     for (const groupValue of groups)
     {
@@ -91,7 +35,6 @@ export function parseUsageReport(payload: unknown, observedAt: number): AdapterR
         if (group === undefined)
             continue;
         const groupName = asString(group.name) ?? "Antigravity";
-        const description = asString(group.description);
         const buckets = Array.isArray(group.buckets) ? group.buckets : [];
         for (const bucketValue of buckets)
         {
@@ -103,28 +46,35 @@ export function parseUsageReport(payload: unknown, observedAt: number): AdapterR
             if (bucketId === undefined || remaining === undefined || remaining < -1e-9 || remaining > 1 + 1e-9)
                 continue;
             const windowText = asString(bucket.window);
+            const resetText = asString(bucket.reset_time);
+            const resetAt = resetText === undefined ? undefined : Date.parse(resetText);
             const window: UsageWindow = {
                 id: bucketId,
                 label: windowLabel(windowText, bucketId),
                 usedPercent: (1 - Math.min(Math.max(remaining, 0), 1)) * 100,
-                durationMinutes: parseWindowMinutes(windowText),
-                resetsAt: parseResetTime(bucket.reset_time),
+                durationMinutes: parseDurationMinutes(windowText),
+                resetsAt: resetAt !== undefined && Number.isFinite(resetAt) ? resetAt : undefined,
             };
-            const poolId = bucketPoolId(bucketId) ?? groupPoolId(groupName) ?? slug(groupName);
+            const knownPoolId = bucketPoolId(bucketId) ?? groupPoolId(groupName);
+            const fallbackId = groupName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+            const poolId = knownPoolId ?? (fallbackId.length === 0 ? "unknown" : fallbackId);
             const pool = pools.get(poolId);
             if (pool === undefined)
-                pools.set(poolId, { id: poolId, label: groupName, description, windows: [window] });
+            {
+                pools.set(poolId, { id: poolId, label: groupName, windows: [window] });
+            }
             else
                 pool.windows.push(window);
         }
     }
     if (pools.size === 0)
-        throw new AdapterError(ConnectionState.Unavailable, "Antigravity reported no usable quota windows.");
+        throw new UsageError(ConnectionState.Unavailable, "Antigravity reported no usable quota windows.");
     const ordered = [...pools.values()].sort((left, right) =>
         poolRank(left.id) - poolRank(right.id) || left.id.localeCompare(right.id));
     for (const pool of ordered)
         pool.windows.sort(compareWindows);
-    return { observedAt, pools: ordered, metadata: [] };
+    const partial = EXPECTED_POOL_IDS.some((poolId) => !pools.has(poolId));
+    return { pools: ordered, metadata: [], partial };
 }
 
 function assertNoTokensConsumed(usage: unknown): void
@@ -135,10 +85,8 @@ function assertNoTokensConsumed(usage: unknown): void
     for (const key of TOKEN_COUNTER_KEYS)
     {
         const value = asNumber(record[key]);
-        if (value === undefined || value <= 0)
-            continue;
-        const message = "The Antigravity usage probe consumed model tokens; automatic polling is stopped.";
-        throw new AdapterError(ConnectionState.Unsupported, message);
+        if (value !== undefined && value > 0)
+            throw new UsageError(ConnectionState.Unsupported, TOKEN_STOP_MESSAGE, true);
     }
 }
 
@@ -154,39 +102,6 @@ function windowLabel(windowText: string | undefined, fallback: string): string
     if (normalized === "monthly")
         return "Monthly";
     return windowText.trim();
-}
-
-function parseWindowMinutes(windowText: string | undefined): number | undefined
-{
-    if (windowText === undefined)
-        return undefined;
-    const normalized = windowText.trim().toLowerCase();
-    if (normalized === "weekly")
-        return 10080;
-    if (normalized === "daily")
-        return 1440;
-    if (normalized === "monthly")
-        return 43200;
-    const match = /^(\d+)\s*([hmd])$/.exec(normalized);
-    if (match === null)
-        return undefined;
-    const amount = Number(match[1]);
-    if (!Number.isFinite(amount) || amount <= 0)
-        return undefined;
-    if (match[2] === "h")
-        return amount * 60;
-    if (match[2] === "d")
-        return amount * 1440;
-    return amount;
-}
-
-function parseResetTime(value: unknown): number | undefined
-{
-    const text = asString(value);
-    if (text === undefined)
-        return undefined;
-    const parsed = Date.parse(text);
-    return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function bucketPoolId(bucketId: string): string | undefined
@@ -207,17 +122,18 @@ function groupPoolId(groupName: string): string | undefined
     return undefined;
 }
 
-function slug(text: string): string
+function compareWindows(left: UsageWindow, right: UsageWindow): number
 {
-    const normalized = text.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-    return normalized.length === 0 ? "unknown" : normalized;
+    const leftDuration = left.durationMinutes ?? Number.POSITIVE_INFINITY;
+    const rightDuration = right.durationMinutes ?? Number.POSITIVE_INFINITY;
+    return leftDuration - rightDuration || left.id.localeCompare(right.id);
 }
 
-function poolRank(id: string): number
+function poolRank(poolId: string): number
 {
-    if (id === "gemini")
+    if (poolId === "gemini")
         return 0;
-    if (id === "other")
+    if (poolId === "other")
         return 1;
     return 2;
 }

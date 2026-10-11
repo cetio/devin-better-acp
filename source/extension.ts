@@ -1,12 +1,15 @@
 import { installAntigravity, antigravityInstallPaths } from "./antigravity/install";
-import { isExecutableFile, resolveCli } from "./process/discovery";
-import { normalizeSettings, refreshIntervalMs, staleAfterMs, UsageSettings } from "./settings";
-import { UsageOptions, UsageService } from "./usage";
-import { PROVIDER_SPECS } from "./registry";
-import { UsagePicker, PickerFocus } from "./ui/picker";
+import { antigravityLaunchConfigPath, antigravityLaunchSettings, writeAntigravityLaunchSettings } from "./antigravity/config";
+import type { AntigravityConfig } from "./antigravity/config";
+import { isExecutableFile } from "./cli";
+import { startPolling } from "./poll";
+import { readExtensionConfig } from "./config";
+import type { ExtensionConfig } from "./config";
+import { UsageService } from "./usage";
+import { UsagePicker } from "./ui/picker";
+import type { PickerFocus } from "./ui/picker";
 import { StatusBarView } from "./ui/status";
-import { ProviderId, ProviderStatus } from "./allowance/model";
-import { ProviderSetup } from "./adapter";
+import type { ProviderId, ProviderStatus } from "./usage";
 
 import * as vscode from "vscode";
 import { mkdirSync } from "node:fs";
@@ -15,8 +18,6 @@ import { join } from "node:path";
 
 const CHATGPT_USAGE_URL = "https://chatgpt.com/settings/usage?tab=overview";
 const SETTINGS_QUERY = "@ext:cet.devin-better-acp";
-const VERSION_TIMEOUT_MS = 10000;
-const UNTRUSTED_MESSAGE = "Trust this workspace to enable usage monitoring.";
 
 export type ExtensionApi = {
     refreshAll: () => Promise<void>;
@@ -26,25 +27,29 @@ export type ExtensionApi = {
 export function activate(context: vscode.ExtensionContext): ExtensionApi
 {
     const storage = ensureStorage(join(context.globalStorageUri.fsPath, "work"));
-    let settings = readSettings();
+    let settings = readExtensionConfig(vscode.workspace.getConfiguration("devinBetterACP"));
+    let launchSettingsWrite: Promise<void> = Promise.resolve();
 
     const usage = new UsageService({
-        ...usageOptions(settings),
+        intervalMs: settings.intervalMs,
+        staleAfterMs: settings.staleAfterMs,
+        trusted: vscode.workspace.isTrusted,
         now: () => Date.now(),
-        random: Math.random,
-        setTimeout: (callback, delayMs) =>
-        {
-            const handle = setTimeout(callback, delayMs);
-            handle.unref();
-            return { cancel: () => clearTimeout(handle) };
-        },
+        context: () => ({
+            workingDirectory: storage,
+            workspacePaths: (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
+            environment: process.env,
+            home: homedir(),
+            clientVersion: clientVersion(context),
+        }),
+        schedule: startPolling,
         onDidChange: () => render(),
     });
-    const view = new StatusBarView(settings.alignment, settings.visibility);
+    const view = new StatusBarView(settings.alignment, providerVisibility(settings));
     const picker = new UsagePicker({
-        refreshAll: () => usage.refreshAll({ manual: true }),
-        refreshProvider: (provider) => usage.refresh(provider, { manual: true }),
-        retry: (provider) => usage.refresh(provider, { manual: true }),
+        refreshAll: () => usage.refreshAll(),
+        refreshProvider: (provider) => usage.refresh(provider),
+        retry: (provider) => usage.retry(provider),
         configureCli: (provider) => void configureCli(provider),
         openSettings: () => void vscode.commands.executeCommand("workbench.action.openSettings", SETTINGS_QUERY),
         openChatGptUsage: () => void vscode.env.openExternal(vscode.Uri.parse(CHATGPT_USAGE_URL)),
@@ -58,74 +63,48 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
         picker.update(state);
     }
 
-    function buildSetups(): ProviderSetup[]
+    function syncLaunchSettings(config: AntigravityConfig): Promise<void>
     {
-        const workspacePaths = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
-        return PROVIDER_SPECS.map((spec) =>
+        const launchSettings = antigravityLaunchSettings(config);
+        const write = launchSettingsWrite.catch(() => undefined).then(() =>
+            writeAntigravityLaunchSettings(launchSettings, antigravityLaunchConfigPath()));
+        launchSettingsWrite = write;
+        return write;
+    }
+
+    function currentAntigravityConfig(): AntigravityConfig
+    {
+        const provider = settings.providers.find((candidate) => candidate.id === "antigravity");
+        if (provider?.id !== "antigravity")
+            throw new Error("Antigravity configuration is unavailable.");
+        return provider;
+    }
+
+    function queueLaunchSettingsSync(): void
+    {
+        void syncLaunchSettings(currentAntigravityConfig()).catch(() =>
         {
-            const providerSettings = settings.providers[spec.id];
-            if (!providerSettings.enabled)
-            {
-                return {
-                    provider: spec.id,
-                    label: spec.label,
-                    enabled: false,
-                    adapter: undefined,
-                    message: undefined,
-                };
-            }
-            const resolution = resolveCli({
-                name: spec.command,
-                configuredPath: providerSettings.path,
-                workspacePaths,
-                environment: process.env,
-                home: homedir(),
-            });
-            if ("error" in resolution)
-            {
-                return {
-                    provider: spec.id,
-                    label: spec.label,
-                    enabled: true,
-                    adapter: undefined,
-                    message: resolution.error,
-                };
-            }
-            const invocation = {
-                command: resolution.path,
-                readArgs: spec.readArgs,
-                versionArgs: ["--version"],
-                cwd: storage,
-                timeoutMs: spec.timeoutMs,
-                versionTimeoutMs: VERSION_TIMEOUT_MS,
-            };
-            return {
-                provider: spec.id,
-                label: spec.label,
-                enabled: true,
-                adapter: spec.create(invocation, clientVersion(context)),
-                message: undefined,
-            };
+            void vscode.window.showErrorMessage("Devin Better ACP: could not save Antigravity launch settings.");
         });
     }
 
+    queueLaunchSettingsSync();
+    usage.configure(settings);
     if (!vscode.workspace.isTrusted)
-        usage.setPaused(UNTRUSTED_MESSAGE);
-    usage.configure(buildSetups(), usageOptions(settings));
-    usage.setFocused(vscode.window.state.focused);
+        usage.setTrusted(false);
     render();
 
     context.subscriptions.push(
-        vscode.workspace.onDidGrantWorkspaceTrust(() => usage.setPaused(undefined)),
-        vscode.window.onDidChangeWindowState((state) => usage.setFocused(state.focused)),
+        vscode.workspace.onDidGrantWorkspaceTrust(() => usage.setTrusted(true)),
         vscode.workspace.onDidChangeConfiguration((event) =>
         {
             if (!event.affectsConfiguration("devinBetterACP"))
                 return;
-            settings = readSettings();
+            settings = readExtensionConfig(vscode.workspace.getConfiguration("devinBetterACP"));
             view.setAlignment(settings.alignment);
-            view.setVisibility(settings.visibility);
-            usage.configure(buildSetups(), usageOptions(settings));
+            view.setVisibility(providerVisibility(settings));
+            usage.configure(settings);
+            queueLaunchSettingsSync();
             render();
         }),
         vscode.commands.registerCommand("devinBetterACP.showUsage", (focus?: unknown) =>
@@ -134,20 +113,20 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
         }),
         vscode.commands.registerCommand("devinBetterACP.refreshAll", async () =>
         {
-            await usage.refreshAll({ manual: true });
+            await usage.refreshAll();
             render();
         }),
         vscode.commands.registerCommand("devinBetterACP.retry", async (provider?: unknown) =>
         {
-            const target = await resolveProvider(provider);
+            const target = await resolveProvider(provider, settings);
             if (target === undefined)
                 return;
-            await usage.refresh(target, { manual: true });
+            await usage.retry(target);
             render();
         }),
         vscode.commands.registerCommand("devinBetterACP.configureCli", async (provider?: unknown) =>
         {
-            const target = await resolveProvider(provider);
+            const target = await resolveProvider(provider, settings);
             if (target !== undefined)
                 await configureCli(target);
         }),
@@ -169,7 +148,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
                     modal: true,
                     detail: `This copies the ACP shim into ${paths.installDirectory} and updates `
                         + `${paths.registryPath}. Matching Antigravity entries will be replaced; `
-                        + "unrelated entries are preserved.",
+                        + `unrelated entries are preserved, and the three launch options are written to `
+                        + `${paths.launchConfigPath}.`,
                 },
                 "Install",
             );
@@ -177,9 +157,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
                 return;
             try
             {
+                await syncLaunchSettings(currentAntigravityConfig());
                 const installed = await installAntigravity(context.extensionUri.fsPath);
                 void vscode.window.showInformationMessage(
-                    `Installed Devin Better Antigravity. Restart Devin Desktop to reload ${installed.registryPath}.`,
+                    `Installed Devin Better Antigravity. Run Devin: Reload ACP Connections to apply settings from `
+                        + `${installed.launchConfigPath}.`,
                 );
             }
             catch (error)
@@ -199,35 +181,16 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
     );
 
     return {
-        refreshAll: () => usage.refreshAll({ manual: true }),
+        refreshAll: () => usage.refreshAll(),
         statuses: () => usage.getStatuses(),
     };
 }
 
-function readSettings(): UsageSettings
+function providerVisibility(config: ExtensionConfig): Record<ProviderId, boolean>
 {
-    const configuration = vscode.workspace.getConfiguration("devinBetterACP");
-    const antigravityVisibility = configuration.inspect<boolean>("statusBar.showAntigravity")?.globalValue;
-    const legacyGeminiVisibility = configuration.inspect<boolean>("statusBar.showGemini")?.globalValue;
-    const legacyOtherVisibility = configuration.inspect<boolean>("statusBar.showOther")?.globalValue;
-    return normalizeSettings({
-        codexEnabled: configuration.get("codex.enabled"),
-        codexPath: configuration.get("codex.path"),
-        antigravityEnabled: configuration.get("antigravity.enabled"),
-        antigravityPath: configuration.get("antigravity.path"),
-        refreshIntervalSeconds: configuration.get("refreshIntervalSeconds"),
-        alignment: configuration.get("statusBar.alignment"),
-        showCodex: configuration.get("statusBar.showCodex"),
-        showAntigravity: antigravityVisibility ?? ((legacyGeminiVisibility ?? true) || (legacyOtherVisibility ?? true)),
-    });
-}
-
-function usageOptions(settings: UsageSettings): UsageOptions
-{
-    return {
-        intervalMs: refreshIntervalMs(settings),
-        staleAfterMs: staleAfterMs(settings),
-    };
+    const codex = config.providers.find((provider) => provider.id === "codex");
+    const antigravity = config.providers.find((provider) => provider.id === "antigravity");
+    return { codex: codex?.visible ?? true, antigravity: antigravity?.visible ?? true };
 }
 
 function clientVersion(context: vscode.ExtensionContext): string
@@ -236,15 +199,12 @@ function clientVersion(context: vscode.ExtensionContext): string
     return typeof version === "string" ? version : "0.0.0";
 }
 
-async function resolveProvider(value: unknown): Promise<ProviderId | undefined>
+async function resolveProvider(value: unknown, config: ExtensionConfig): Promise<ProviderId | undefined>
 {
     if (value === "codex" || value === "antigravity")
         return value;
     const picked = await vscode.window.showQuickPick(
-        [
-            { label: "Codex", provider: "codex" as ProviderId },
-            { label: "Antigravity", provider: "antigravity" as ProviderId },
-        ],
+        config.providers.map((provider) => ({ label: provider.label, provider: provider.id })),
         { title: "Devin Better ACP", placeHolder: "Select a provider" },
     );
     return picked?.provider;
@@ -252,11 +212,9 @@ async function resolveProvider(value: unknown): Promise<ProviderId | undefined>
 
 async function configureCli(provider: ProviderId): Promise<void>
 {
-    const spec = PROVIDER_SPECS.find((candidate) => candidate.id === provider);
-    if (spec === undefined)
-        return;
+    const label = provider === "codex" ? "Codex" : "Antigravity";
     const picked = await vscode.window.showOpenDialog({
-        title: `Select the ${spec.label} CLI executable`,
+        title: `Select the ${label} CLI executable`,
         openLabel: "Use this executable",
         canSelectFiles: true,
         canSelectFolders: false,

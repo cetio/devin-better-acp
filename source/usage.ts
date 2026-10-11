@@ -1,24 +1,60 @@
-import { backoffDelayMs, earliestResetAt, isTerminal } from "./allowance/schedule";
-import { sanitizeLabel } from "./allowance/format";
-import {
-    ConnectionState,
-    expectedPoolIds,
-    ProviderId,
-    ProviderStatus,
-} from "./allowance/model";
-import { AdapterError, ProviderAdapter, ProviderSetup } from "./adapter";
-import { formatVersion, parseVersion, versionAtLeast } from "./process/version";
+import type { PollScheduler } from "./poll";
+import type { CliContext } from "./cli";
+import type { ExtensionConfig, ProviderConfig } from "./config";
 
-const RESET_GRACE_MS = 5000;
-const TIME_TICK_MS = 60000;
+export type ProviderId = "codex" | "antigravity";
 
-export type TimerHandle = {
-    cancel: () => void;
+export enum ConnectionState
+{
+    Loading = "loading",
+    Ready = "ready",
+    Partial = "partial",
+    Stale = "stale",
+    MissingCli = "missingCli",
+    AuthRequired = "authRequired",
+    Unavailable = "unavailable",
+    Unsupported = "unsupported",
+    Disabled = "disabled",
+}
+
+export type UsageWindow = {
+    id: string;
+    label: string;
+    usedPercent: number;
+    durationMinutes: number | undefined;
+    resetsAt: number | undefined;
 };
 
-export type UsageOptions = {
-    intervalMs: number;
-    staleAfterMs: number;
+export type UsagePool = {
+    id: string;
+    label: string;
+    windows: UsageWindow[];
+};
+
+export type MetadataEntry = {
+    label: string;
+    value: string;
+};
+
+export type UsageReport = {
+    pools: UsagePool[];
+    metadata: MetadataEntry[];
+    partial: boolean;
+};
+
+export type ProviderSnapshot = {
+    pools: UsagePool[];
+    metadata: MetadataEntry[];
+};
+
+export type ProviderStatus = {
+    provider: ProviderId;
+    label: string;
+    state: ConnectionState;
+    message: string | undefined;
+    snapshot: ProviderSnapshot | undefined;
+    refreshing: boolean;
+    lastSuccessAt: number | undefined;
 };
 
 export type UsageState = {
@@ -27,75 +63,105 @@ export type UsageState = {
     statuses: ProviderStatus[];
 };
 
-export type UsageServiceOptions = UsageOptions & {
+export type UsageServiceOptions = {
+    intervalMs: number;
+    staleAfterMs: number;
+    trusted: boolean;
     now: () => number;
-    random: () => number;
-    setTimeout: (callback: () => void, delayMs: number) => TimerHandle;
+    context: () => CliContext;
+    schedule: PollScheduler;
     onDidChange: () => void;
 };
 
-type VersionVerdict = {
-    text: string;
-    supported: boolean;
-    message: string | undefined;
-};
+export class UsageError extends Error
+{
+    readonly state: ConnectionState;
+    readonly stopPolling: boolean;
+
+    constructor(state: ConnectionState, message: string, stopPolling = false)
+    {
+        super(message);
+        this.name = "UsageError";
+        this.state = state;
+        this.stopPolling = stopPolling;
+    }
+}
 
 type RuntimeState = {
-    setup: ProviderSetup;
-    signature: string;
+    config: ProviderConfig;
     status: ProviderStatus;
-    timer: TimerHandle | undefined;
     abort: AbortController | undefined;
     inflight: Promise<void> | undefined;
-    generation: number;
-    failures: number;
-    versionVerdict: VersionVerdict | undefined;
+    refreshQueued: boolean;
+    stoppedForTokens: boolean;
 };
+
+const TIME_TICK_MS = 60000;
+const UNTRUSTED_MESSAGE = "Trust this workspace to enable usage monitoring.";
+const DISABLED_MESSAGE = "Usage monitoring is disabled in settings.";
+const REQUEST_FAILED_MESSAGE = "The usage request failed.";
 
 export class UsageService
 {
     private readonly options: UsageServiceOptions;
     private readonly states = new Map<ProviderId, RuntimeState>();
-    private nextGenerationId = 1;
-    private focused = true;
-    private paused: string | undefined;
-    private clockTimer: TimerHandle | undefined;
+    private intervalMs: number;
+    private staleAfterMs: number;
+    private trusted: boolean;
+    private pollingStop: (() => void) | undefined;
+    private displayStop: (() => void) | undefined;
     private disposed = false;
 
     constructor(options: UsageServiceOptions)
     {
         this.options = options;
+        this.intervalMs = options.intervalMs;
+        this.staleAfterMs = options.staleAfterMs;
+        this.trusted = options.trusted;
+        this.displayStop = options.schedule(() => this.emit(), TIME_TICK_MS);
     }
 
-    configure(setups: ProviderSetup[], options?: UsageOptions): void
+    configure(config: ExtensionConfig): void
     {
-        if (options !== undefined)
-            this.setOptions(options, false);
-        const seen = new Set<ProviderId>();
-        for (const setup of setups)
+        this.updateInterval(config.intervalMs, config.staleAfterMs);
+        const refresh = new Set<ProviderId>();
+        for (const providerConfig of config.providers)
         {
-            seen.add(setup.provider);
-            const signature = setupSignature(setup);
-            const existing = this.states.get(setup.provider);
-            if (existing !== undefined && existing.signature === signature)
+            const state = this.states.get(providerConfig.id);
+            if (state === undefined)
             {
-                existing.setup = setup;
+                const created: RuntimeState = {
+                    config: providerConfig,
+                    status: initialStatus(providerConfig, this.trusted),
+                    abort: undefined,
+                    inflight: undefined,
+                    refreshQueued: false,
+                    stoppedForTokens: false,
+                };
+                this.states.set(providerConfig.id, created);
+                if (this.trusted && providerConfig.enabled)
+                    refresh.add(providerConfig.id);
                 continue;
             }
-            if (existing !== undefined)
-                this.reset(existing);
-            this.states.set(setup.provider, this.createState(setup, signature));
-        }
-        for (const [provider, state] of [...this.states])
-        {
-            if (seen.has(provider))
+
+            const changed = state.config.enabled !== providerConfig.enabled || state.config.path !== providerConfig.path;
+            state.config = providerConfig;
+            if (!changed)
                 continue;
-            this.reset(state);
-            this.states.delete(provider);
+            this.cancel(state, this.trusted && providerConfig.enabled);
+            state.status = initialStatus(providerConfig, this.trusted);
+            if (state.stoppedForTokens)
+            {
+                state.status.state = ConnectionState.Unsupported;
+                state.status.message = TOKEN_STOP_MESSAGE;
+            }
+            else if (this.trusted && providerConfig.enabled && state.inflight === undefined)
+                refresh.add(providerConfig.id);
         }
+        this.syncPolling();
         this.emit();
-        for (const state of this.states.values())
-            this.start(state);
+        for (const provider of refresh)
+            void this.refresh(provider);
     }
 
     getState(): UsageState
@@ -103,7 +169,7 @@ export class UsageService
         return {
             statuses: this.getStatuses(),
             now: this.options.now(),
-            staleAfterMs: this.options.staleAfterMs,
+            staleAfterMs: this.staleAfterMs,
         };
     }
 
@@ -112,385 +178,217 @@ export class UsageService
         return [...this.states.values()].map((state) => state.status);
     }
 
-    refreshAll(options: { manual?: boolean } = {}): Promise<void>
+    refreshAll(): Promise<void>
     {
-        const refreshes = [...this.states.keys()].map((provider) => this.refresh(provider, options));
-        return Promise.all(refreshes).then(() => undefined);
+        return Promise.all([...this.states.keys()].map((provider) => this.refresh(provider))).then(() => undefined);
     }
 
-    refresh(provider: ProviderId, options: { manual?: boolean } = {}): Promise<void>
+    refresh(provider: ProviderId): Promise<void>
+    {
+        return this.refreshProvider(provider, false);
+    }
+
+    retry(provider: ProviderId): Promise<void>
+    {
+        return this.refreshProvider(provider, true);
+    }
+
+    setTrusted(trusted: boolean): void
+    {
+        if (this.trusted === trusted || this.disposed)
+            return;
+        this.trusted = trusted;
+        const refresh = new Set<ProviderId>();
+        for (const state of this.states.values())
+        {
+            this.cancel(state, trusted && state.config.enabled);
+            state.status = initialStatus(state.config, trusted);
+            if (!trusted)
+            {
+                state.status.state = ConnectionState.Unavailable;
+                state.status.message = UNTRUSTED_MESSAGE;
+            }
+            else if (state.stoppedForTokens)
+            {
+                state.status.state = ConnectionState.Unsupported;
+                state.status.message = TOKEN_STOP_MESSAGE;
+            }
+            else if (state.config.enabled && state.inflight === undefined)
+                refresh.add(state.config.id);
+        }
+        this.syncPolling();
+        this.emit();
+        for (const provider of refresh)
+            void this.refresh(provider);
+    }
+
+    dispose(): void
+    {
+        if (this.disposed)
+            return;
+        this.disposed = true;
+        this.stopPolling();
+        this.displayStop?.();
+        this.displayStop = undefined;
+        for (const state of this.states.values())
+            this.cancel(state, false);
+        this.states.clear();
+    }
+
+    private refreshProvider(provider: ProviderId, retry: boolean): Promise<void>
     {
         const state = this.states.get(provider);
-        if (state === undefined || this.disposed || this.paused !== undefined)
+        if (state === undefined || this.disposed || !this.trusted || !state.config.enabled)
             return Promise.resolve();
-        if (!state.setup.enabled || state.setup.adapter === undefined)
+        if (state.stoppedForTokens && !retry)
             return Promise.resolve();
         if (state.inflight !== undefined)
             return state.inflight;
-        const inflight = this.runRefresh(state, options.manual === true).finally(() =>
+
+        const abort = new AbortController();
+        state.abort = abort;
+        state.status.refreshing = true;
+        if (state.status.snapshot === undefined)
+            state.status.state = ConnectionState.Loading;
+        this.emit();
+
+        let inflight: Promise<void>;
+        inflight = this.readProvider(state, abort).finally(() =>
         {
-            if (state.inflight === inflight)
-                state.inflight = undefined;
+            if (state.inflight !== inflight)
+                return;
+            state.inflight = undefined;
+            if (state.abort === abort)
+                state.abort = undefined;
+            if (this.isCurrent(state, abort))
+            {
+                state.status.refreshing = false;
+                this.emit();
+            }
+            if (state.refreshQueued)
+            {
+                state.refreshQueued = false;
+                void this.refresh(state.config.id);
+            }
         });
         state.inflight = inflight;
         return inflight;
     }
 
-    setFocused(focused: boolean): void
+    private async readProvider(state: RuntimeState, abort: AbortController): Promise<void>
     {
-        if (this.focused === focused)
-            return;
-        this.focused = focused;
-        if (!focused)
-        {
-            for (const state of this.states.values())
-            {
-                if (state.timer !== undefined)
-                {
-                    state.timer.cancel();
-                    state.timer = undefined;
-                }
-            }
-            return;
-        }
-        const now = this.options.now();
-        const intervalMs = this.options.intervalMs;
-        for (const state of this.states.values())
-        {
-            if (!state.setup.enabled || state.setup.adapter === undefined || this.paused !== undefined)
-                continue;
-            const lastAttemptAt = state.status.lastAttemptAt;
-            if (intervalMs > 0 && lastAttemptAt !== undefined && now - lastAttemptAt >= intervalMs)
-                void this.refresh(state.setup.provider);
-            else
-                this.scheduleNext(state);
-        }
-    }
-
-    setPaused(message: string | undefined): void
-    {
-        if (this.paused === message)
-            return;
-        this.paused = message;
-        for (const state of this.states.values())
-        {
-            this.cancelWork(state);
-            state.generation = this.nextGenerationId++;
-            if (message !== undefined)
-            {
-                this.patch(state, {
-                    state: ConnectionState.Unavailable,
-                    message,
-                    snapshot: undefined,
-                    refreshing: false,
-                });
-            }
-            else
-                this.patch(state, { state: ConnectionState.Loading, message: undefined, refreshing: false });
-        }
-        this.emit();
-        if (message === undefined)
-        {
-            for (const state of this.states.values())
-                this.start(state);
-        }
-    }
-
-    dispose(): void
-    {
-        this.disposed = true;
-        for (const state of this.states.values())
-        {
-            this.cancelWork(state);
-            state.generation = this.nextGenerationId++;
-        }
-        this.states.clear();
-        this.cancelClock();
-    }
-
-    private createState(setup: ProviderSetup, signature: string): RuntimeState
-    {
-        return {
-            setup,
-            signature,
-            status: initialStatus(setup),
-            timer: undefined,
-            abort: undefined,
-            inflight: undefined,
-            generation: this.nextGenerationId++,
-            failures: 0,
-            versionVerdict: undefined,
-        };
-    }
-
-    private start(state: RuntimeState): void
-    {
-        if (this.disposed)
-            return;
-        if (this.paused !== undefined)
-        {
-            this.patch(state, {
-                state: ConnectionState.Unavailable,
-                message: this.paused,
-                snapshot: undefined,
-                refreshing: false,
-            });
-            return;
-        }
-        if (!state.setup.enabled)
-        {
-            this.patch(state, {
-                state: ConnectionState.Disabled,
-                message: "Usage monitoring is disabled in settings.",
-                snapshot: undefined,
-                refreshing: false,
-            });
-            return;
-        }
-        if (state.setup.adapter === undefined)
-        {
-            this.patch(state, {
-                state: ConnectionState.MissingCli,
-                message: state.setup.message,
-                snapshot: undefined,
-                refreshing: false,
-            });
-            return;
-        }
-        void this.refresh(state.setup.provider);
-    }
-
-    private async runRefresh(state: RuntimeState, manual: boolean): Promise<void>
-    {
-        const adapter = state.setup.adapter;
-        if (adapter === undefined)
-            return;
-        const generation = state.generation;
-        const abort = new AbortController();
-        state.abort = abort;
-        const startedAt = this.options.now();
-        this.patch(state, { refreshing: true, lastAttemptAt: startedAt });
         try
         {
-            const verdict = await this.resolveVersion(state, adapter, manual, abort.signal);
-            if (!this.isCurrent(state, generation))
+            const report = await state.config.cli.readUsage(state.config, this.options.context(), abort.signal);
+            if (!this.isCurrent(state, abort))
                 return;
-            if (verdict !== undefined && !verdict.supported && !manual)
-            {
-                this.patch(state, {
-                    state: ConnectionState.Unsupported,
-                    message: verdict.message,
-                    cliVersion: verdict.text,
-                    snapshot: undefined,
-                    refreshing: false,
-                });
-                return;
-            }
-            const result = await adapter.read(abort.signal);
-            if (!this.isCurrent(state, generation))
-                return;
-            const missing = expectedPoolIds(state.setup.provider)
-                .some((poolId) => !result.pools.some((pool) => pool.id === poolId));
-            this.patch(state, {
-                state: missing ? ConnectionState.Partial : ConnectionState.Ready,
-                message: missing ? "Some allowance pools were not reported." : undefined,
-                snapshot: { observedAt: result.observedAt, pools: result.pools, metadata: result.metadata },
-                refreshing: false,
-                lastSuccessAt: this.options.now(),
-            });
-            state.failures = 0;
+            state.stoppedForTokens = false;
+            state.status.state = report.partial ? ConnectionState.Partial : ConnectionState.Ready;
+            state.status.message = report.partial ? "Some allowance pools were not reported." : undefined;
+            state.status.snapshot = { pools: report.pools, metadata: report.metadata };
+            state.status.lastSuccessAt = this.options.now();
         }
         catch (error)
         {
-            if (!this.isCurrent(state, generation))
+            if (!this.isCurrent(state, abort))
                 return;
-            state.failures += 1;
-            const failure = error instanceof AdapterError
+            const failure = error instanceof UsageError
                 ? error
-                : new AdapterError(ConnectionState.Unavailable, "The usage request failed.");
-            const keepSnapshot = failure.state === ConnectionState.Unavailable && state.status.snapshot !== undefined;
-            this.patch(state, {
-                state: keepSnapshot ? ConnectionState.Stale : failure.state,
-                message: failure.message,
-                snapshot: keepSnapshot ? state.status.snapshot : undefined,
-                refreshing: false,
-            });
+                : new UsageError(ConnectionState.Unavailable, REQUEST_FAILED_MESSAGE);
+            if (failure.stopPolling)
+            {
+                state.stoppedForTokens = true;
+                state.status.state = failure.state;
+                state.status.message = failure.message;
+                state.status.snapshot = undefined;
+                state.status.lastSuccessAt = undefined;
+            }
+            else
+            {
+                const keepsSnapshot = state.status.snapshot !== undefined
+                    && failure.state !== ConnectionState.AuthRequired
+                    && failure.state !== ConnectionState.MissingCli;
+                state.status.state = keepsSnapshot ? ConnectionState.Stale : failure.state;
+                state.status.message = failure.message;
+                if (!keepsSnapshot)
+                {
+                    state.status.snapshot = undefined;
+                    state.status.lastSuccessAt = undefined;
+                }
+            }
         }
         finally
         {
-            if (state.abort === abort)
-                state.abort = undefined;
-            if (this.isCurrent(state, generation))
-                this.scheduleNext(state);
-            this.emit();
+            if (this.isCurrent(state, abort))
+            {
+                state.status.refreshing = false;
+                this.emit();
+            }
         }
     }
 
-    private async resolveVersion(
-        state: RuntimeState,
-        adapter: ProviderAdapter,
-        manual: boolean,
-        signal: AbortSignal,
-    ): Promise<VersionVerdict | undefined>
+    private updateInterval(intervalMs: number, staleAfterMs: number): void
     {
-        if (state.versionVerdict !== undefined && !manual)
-            return state.versionVerdict;
-        const text = await adapter.version(signal);
-        const version = parseVersion(text);
-        let verdict: VersionVerdict;
-        if (version === undefined)
-        {
-            const unsupported = adapter.minimumVersion === undefined;
-            verdict = {
-                text: sanitizeLabel(text),
-                supported: unsupported,
-                message: unsupported ? undefined : `Could not determine the ${state.setup.label} CLI version.`,
-            };
-        }
-        else if (adapter.minimumVersion !== undefined && !versionAtLeast(version, adapter.minimumVersion))
-        {
-            const current = formatVersion(version);
-            const minimum = formatVersion(adapter.minimumVersion);
-            const message = `${state.setup.label} CLI ${current} is older than the verified ${minimum}; `
-                + "automatic polling is paused. Update the CLI, then use Retry Connection.";
-            verdict = { text: current, supported: false, message };
-        }
-        else
-        {
-            verdict = { text: formatVersion(version), supported: true, message: undefined };
-        }
-        state.versionVerdict = verdict;
-        this.patch(state, { cliVersion: verdict.text });
-        return verdict;
-    }
-
-    private scheduleNext(state: RuntimeState): void
-    {
-        if (state.timer !== undefined)
-        {
-            state.timer.cancel();
-            state.timer = undefined;
-        }
-        if (this.disposed || this.paused !== undefined || !this.focused || !state.setup.enabled)
+        if (this.intervalMs === intervalMs && this.staleAfterMs === staleAfterMs)
             return;
-        const intervalMs = this.options.intervalMs;
-        if (intervalMs <= 0 || isTerminal(state.status.state))
+        this.intervalMs = intervalMs;
+        this.staleAfterMs = staleAfterMs;
+        this.syncPolling(true);
+    }
+
+    private syncPolling(restart = false): void
+    {
+        const shouldPoll = !this.disposed && this.trusted && this.intervalMs > 0
+            && [...this.states.values()].some((state) => state.config.enabled);
+        if (!shouldPoll)
+        {
+            this.stopPolling();
             return;
-        const now = this.options.now();
-        const base = backoffDelayMs(intervalMs, state.failures);
-        let delay = base + Math.floor(base * 0.05 * this.options.random());
-        const resetAt = earliestResetAt(state.status.snapshot, now);
-        if (resetAt !== undefined)
-        {
-            const resetDelay = resetAt + RESET_GRACE_MS - now;
-            if (resetDelay > 0 && resetDelay < delay)
-                delay = resetDelay;
         }
-        state.timer = this.options.setTimeout(() =>
-        {
-            state.timer = undefined;
-            void this.refresh(state.setup.provider);
-        }, delay);
-    }
-
-    private cancelWork(state: RuntimeState): void
-    {
-        if (state.timer !== undefined)
-        {
-            state.timer.cancel();
-            state.timer = undefined;
-        }
-        if (state.abort !== undefined)
-        {
-            state.abort.abort();
-            state.abort = undefined;
-        }
-    }
-
-    private cancelClock(): void
-    {
-        if (this.clockTimer === undefined)
+        if (!restart && this.pollingStop !== undefined)
             return;
-        this.clockTimer.cancel();
-        this.clockTimer = undefined;
+        this.stopPolling();
+        this.pollingStop = this.options.schedule(() => void this.refreshAll(), this.intervalMs);
     }
 
-    private reset(state: RuntimeState): void
+    private stopPolling(): void
     {
-        this.cancelWork(state);
-        state.generation = this.nextGenerationId++;
-        state.versionVerdict = undefined;
-        state.failures = 0;
+        this.pollingStop?.();
+        this.pollingStop = undefined;
     }
 
-    private isCurrent(state: RuntimeState, generation: number): boolean
+    private cancel(state: RuntimeState, refreshAfterClose: boolean): void
     {
-        return !this.disposed && state.generation === generation;
+        state.refreshQueued = refreshAfterClose && state.inflight !== undefined;
+        state.abort?.abort();
+        state.abort = undefined;
+        state.status.refreshing = false;
     }
 
-    private patch(state: RuntimeState, changes: Partial<ProviderStatus>): void
+    private isCurrent(state: RuntimeState, abort: AbortController): boolean
     {
-        Object.assign(state.status, changes);
-        this.emit();
+        return !this.disposed && this.states.get(state.config.id) === state && state.abort === abort;
     }
 
     private emit(): void
     {
-        if (this.disposed)
-            return;
-        if (this.getStatuses().some((status) => status.snapshot !== undefined))
-        {
-            if (this.clockTimer === undefined)
-            {
-                this.clockTimer = this.options.setTimeout(() =>
-                {
-                    this.clockTimer = undefined;
-                    this.emit();
-                }, TIME_TICK_MS);
-            }
-        }
-        else
-            this.cancelClock();
-        this.options.onDidChange();
-    }
-
-    private setOptions(options: UsageOptions, notify: boolean): void
-    {
-        const intervalChanged = this.options.intervalMs !== options.intervalMs;
-        const staleChanged = this.options.staleAfterMs !== options.staleAfterMs;
-        if (!intervalChanged && !staleChanged)
-            return;
-        this.options.intervalMs = options.intervalMs;
-        this.options.staleAfterMs = options.staleAfterMs;
-        if (intervalChanged)
-        {
-            for (const state of this.states.values())
-                this.scheduleNext(state);
-        }
-        if (notify)
-            this.emit();
+        if (!this.disposed)
+            this.options.onDidChange();
     }
 }
 
-function initialStatus(setup: ProviderSetup): ProviderStatus
+const TOKEN_STOP_MESSAGE = "The Antigravity usage probe consumed model tokens; automatic polling is stopped.";
+
+function initialStatus(config: ProviderConfig, trusted: boolean): ProviderStatus
 {
+    const disabled = !config.enabled;
     return {
-        provider: setup.provider,
-        label: setup.label,
-        state: setup.enabled ? ConnectionState.Loading : ConnectionState.Disabled,
-        message: setup.enabled ? undefined : "Usage monitoring is disabled in settings.",
-        cliVersion: undefined,
+        provider: config.id,
+        label: config.label,
+        state: disabled ? ConnectionState.Disabled : trusted ? ConnectionState.Loading : ConnectionState.Unavailable,
+        message: disabled ? DISABLED_MESSAGE : trusted ? undefined : UNTRUSTED_MESSAGE,
         snapshot: undefined,
         refreshing: false,
-        lastAttemptAt: undefined,
         lastSuccessAt: undefined,
     };
-}
-
-function setupSignature(setup: ProviderSetup): string
-{
-    const adapter = setup.adapter;
-    if (adapter === undefined)
-        return [setup.enabled ? "on" : "off", "none", setup.message ?? ""].join("|");
-    return [setup.enabled ? "on" : "off", adapter.command, adapter.readArgs.join(" ")].join("|");
 }

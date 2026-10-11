@@ -1,161 +1,18 @@
-import { CliProcess } from "../process/runner";
-import { compareWindows, durationLabel } from "../allowance/format";
-import { ConnectionState, MetadataEntry, UsagePool, UsageWindow } from "../allowance/model";
-import {
-    AdapterError,
-    AdapterResult,
-    ProviderAdapter,
-    ProviderInvocation,
-    classifyExit,
-    probeVersion,
-} from "../adapter";
-import { asNumber, asRecord, asString } from "../envelope";
+import { UsageError, UsageReport, UsageWindow, UsagePool, MetadataEntry, ConnectionState } from "../usage";
+import { asNumber, asRecord, asString } from "../parse";
 
-const CLIENT_NAME = "devinBetterACP";
-const CLIENT_TITLE = "Devin Better ACP";
-const MAX_STDOUT_BYTES = 1024 * 1024;
-
-export function createCodexAdapter(invocation: ProviderInvocation, clientVersion: string): ProviderAdapter
-{
-    return {
-        id: "codex",
-        label: "Codex",
-        command: invocation.command,
-        readArgs: invocation.readArgs,
-        minimumVersion: undefined,
-        version: (signal) => probeVersion(invocation, signal),
-        read: (signal) => readUsage(invocation, clientVersion, signal),
-    };
-}
-
-async function readUsage(
-    invocation: ProviderInvocation,
-    clientVersion: string,
-    signal: AbortSignal,
-): Promise<AdapterResult>
-{
-    const process = CliProcess.start({
-        command: invocation.command,
-        args: invocation.readArgs,
-        cwd: invocation.cwd,
-        timeoutMs: invocation.timeoutMs,
-        maxStdoutBytes: MAX_STDOUT_BYTES,
-    }, signal);
-    const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
-    let nextId = 1;
-
-    const rejectPending = (error: AdapterError): void =>
-    {
-        for (const entry of pending.values())
-            entry.reject(error);
-        pending.clear();
-    };
-
-    const request = (method: string, params?: unknown): Promise<unknown> =>
-    {
-        const id = nextId++;
-        return new Promise<unknown>((resolve, reject) =>
-        {
-            pending.set(id, { resolve, reject });
-            const message = params === undefined ? { method, id } : { method, id, params };
-            process.write(`${JSON.stringify(message)}\n`);
-        });
-    };
-
-    process.onLine((line) =>
-    {
-        if (line.trim().length === 0)
-            return;
-        let parsed: unknown;
-        try
-        {
-            parsed = JSON.parse(line);
-        }
-        catch
-        {
-            return;
-        }
-        const message = asRecord(parsed);
-        if (message === undefined)
-            return;
-        const id = asNumber(message.id);
-        const method = asString(message.method);
-        if (id === undefined)
-            return;
-        if (method !== undefined && !("result" in message) && !("error" in message))
-        {
-            process.write(`${JSON.stringify({ id, error: { code: -32601, message: "Unsupported request" } })}\n`);
-            return;
-        }
-        const entry = pending.get(id);
-        if (entry === undefined)
-            return;
-        pending.delete(id);
-        const error = asRecord(message.error);
-        if (error !== undefined)
-            entry.reject(classifyRpcError(error));
-        else
-            entry.resolve(message.result);
-    });
-    process.onExit((exit) => rejectPending(classifyExit(exit, "Codex app-server")));
-
-    try
-    {
-        await request("initialize", { clientInfo: { name: CLIENT_NAME, title: CLIENT_TITLE, version: clientVersion } });
-        process.write(`${JSON.stringify({ method: "initialized", params: {} })}\n`);
-        const accountPromise = request("account/read", { refreshToken: false });
-        const limitsPromise = request("account/rateLimits/read");
-        const [account, limits] = await Promise.all([accountPromise, limitsPromise]);
-        assertChatGptAccount(account);
-        return parseRateLimits(limits, Date.now());
-    }
-    finally
-    {
-        process.terminate();
-    }
-}
-
-function assertChatGptAccount(result: unknown): void
-{
-    const record = asRecord(result);
-    const account = asRecord(record?.account);
-    if (account === undefined)
-        throw new AdapterError(ConnectionState.AuthRequired, "Codex is not signed in. Run `codex login`, then retry.");
-    const type = asString(account.type);
-    if (type !== "chatgpt")
-    {
-        const method = type ?? "an unknown method";
-        const detail = `Codex is signed in with ${method}; subscription allowance requires a ChatGPT login.`;
-        throw new AdapterError(ConnectionState.Unsupported, detail);
-    }
-}
-
-function classifyRpcError(error: Record<string, unknown>): AdapterError
-{
-    const code = asNumber(error.code);
-    const message = asString(error.message) ?? "Codex app-server returned an error.";
-    if (code === -32601 || /method not found|not supported|unknown method/i.test(message))
-        return new AdapterError(ConnectionState.Unsupported, message);
-    if (/auth|login|sign in/i.test(message))
-    {
-        const detail = "Codex needs a ChatGPT login. Run `codex login`, then retry.";
-        return new AdapterError(ConnectionState.AuthRequired, detail);
-    }
-    return new AdapterError(ConnectionState.Unavailable, message);
-}
-
-export function parseRateLimits(result: unknown, observedAt: number): AdapterResult
+export function parseRateLimits(result: unknown): UsageReport
 {
     const record = asRecord(result);
     if (record === undefined)
-        throw new AdapterError(ConnectionState.Unsupported, "Codex returned an unexpected rate-limit response.");
+        throw new UsageError(ConnectionState.Unsupported, "Codex returned an unexpected rate-limit response.");
     const pools: UsagePool[] = [];
     const byId = asRecord(record.rateLimitsByLimitId);
     if (byId !== undefined && Object.keys(byId).length > 0)
     {
-        for (const [key, value] of Object.entries(byId))
+        for (const [poolKey, poolValue] of Object.entries(byId))
         {
-            const pool = parsePool(key, value);
+            const pool = parsePool(poolKey, poolValue);
             if (pool !== undefined)
                 pools.push(pool);
         }
@@ -167,28 +24,28 @@ export function parseRateLimits(result: unknown, observedAt: number): AdapterRes
             pools.push(pool);
     }
     if (pools.length === 0)
-        throw new AdapterError(ConnectionState.Unsupported, "Codex reported no usable rate-limit windows.");
-    pools.sort((left, right) => poolRank(left.id) - poolRank(right.id) || left.id.localeCompare(right.id));
-    return { observedAt, pools, metadata: parseMetadata(record) };
+        throw new UsageError(ConnectionState.Unsupported, "Codex reported no usable rate-limit windows.");
+    pools.sort((left, right) => left.id.localeCompare(right.id));
+    return { pools, metadata: parseMetadata(record), partial: false };
 }
 
-function parsePool(key: string, value: unknown): UsagePool | undefined
+function parsePool(poolKey: string, poolValue: unknown): UsagePool | undefined
 {
-    const entry = asRecord(value);
+    const entry = asRecord(poolValue);
     if (entry === undefined)
         return undefined;
-    const id = asString(entry.limitId) ?? key;
+    const poolId = asString(entry.limitId) ?? poolKey;
     const windows: UsageWindow[] = [];
-    const primary = parseWindow(id, "primary", entry.primary);
+    const primary = parseWindow(poolId, "primary", entry.primary);
     if (primary !== undefined)
         windows.push(primary);
-    const secondary = parseWindow(id, "secondary", entry.secondary);
+    const secondary = parseWindow(poolId, "secondary", entry.secondary);
     if (secondary !== undefined)
         windows.push(secondary);
     if (windows.length === 0)
         return undefined;
     windows.sort(compareWindows);
-    return { id, label: poolLabel(id, asString(entry.limitName)), description: undefined, windows };
+    return { id: poolId, label: poolLabel(poolId, asString(entry.limitName)), windows };
 }
 
 function parseWindow(poolId: string, position: string, value: unknown): UsageWindow | undefined
@@ -201,14 +58,28 @@ function parseWindow(poolId: string, position: string, value: unknown): UsageWin
         return undefined;
     const duration = asNumber(record.windowDurationMins);
     const durationMinutes = duration !== undefined && duration > 0 ? duration : undefined;
-    const resetsAtSeconds = asNumber(record.resetsAt);
+    const resetsAt = asNumber(record.resetsAt);
+    const label = durationMinutes === undefined
+        ? position
+        : durationMinutes === 10080 ? "Weekly"
+            : durationMinutes === 1440 ? "Daily"
+                : durationMinutes % 1440 === 0 ? `${durationMinutes / 1440}d`
+                    : durationMinutes % 60 === 0 ? `${durationMinutes / 60}h`
+                        : `${durationMinutes}m`;
     return {
         id: `${poolId}:${position}`,
-        label: durationMinutes === undefined ? position : durationLabel(durationMinutes),
+        label,
         usedPercent,
         durationMinutes,
-        resetsAt: resetsAtSeconds !== undefined && resetsAtSeconds > 0 ? resetsAtSeconds * 1000 : undefined,
+        resetsAt: resetsAt !== undefined && resetsAt > 0 ? resetsAt * 1000 : undefined,
     };
+}
+
+function compareWindows(left: UsageWindow, right: UsageWindow): number
+{
+    const leftDuration = left.durationMinutes ?? Number.POSITIVE_INFINITY;
+    const rightDuration = right.durationMinutes ?? Number.POSITIVE_INFINITY;
+    return leftDuration - rightDuration || left.id.localeCompare(right.id);
 }
 
 function parseMetadata(record: Record<string, unknown>): MetadataEntry[]
@@ -251,20 +122,13 @@ function defaultLimitRecord(record: Record<string, unknown>): Record<string, unk
     return byId === undefined ? undefined : asRecord(byId.codex);
 }
 
-function poolRank(id: string): number
-{
-    if (id === "codex")
-        return 0;
-    return 1;
-}
-
-function poolLabel(id: string, limitName: string | undefined): string
+function poolLabel(poolId: string, limitName: string | undefined): string
 {
     if (limitName !== undefined)
         return limitName;
-    if (id === "codex")
+    if (poolId === "codex")
         return "Codex";
-    return capitalize(id.replace(/[_-]+/g, " "));
+    return capitalize(poolId.replace(/[_-]+/g, " "));
 }
 
 function capitalize(text: string): string
