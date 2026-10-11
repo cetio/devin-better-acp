@@ -2,13 +2,11 @@
 
 [![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE.txt)
 
-Devin Better ACP is a Devin Desktop status-bar extension that shows Codex
-subscription allowance and Antigravity CLI allowance. It reads both through the
-CLIs you are already signed in to.
+Devin Better ACP is a Devin Desktop extension that provides better ACP functionality for
+Codex and Antigravity, with UI for usage and reset information, and a custom
+Devin-style Antigravity ACP.
 
-```
-Codex    Gemini (AG)    Other (AG)
-```
+> *To install the ACP, first install the extension and then run the ACP install command.*
 
 ## Requirements
 
