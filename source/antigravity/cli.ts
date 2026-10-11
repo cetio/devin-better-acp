@@ -26,7 +26,10 @@ export const antigravityCLI: ProviderCLI = {
         if (result.failure !== undefined || result.code !== 0)
         {
             if (/auth|login|credential|signed in/i.test(result.stderr))
-                throw new UsageError(ConnectionState.AuthRequired, "Antigravity CLI is not signed in. Run `agy`, sign in, then retry.");
+                throw new UsageError(
+                    ConnectionState.AuthRequired,
+                    "Antigravity CLI is not signed in. Run `agy`, sign in, then retry.",
+                );
             throw cliError(result, "Antigravity CLI");
         }
         let payload: unknown;

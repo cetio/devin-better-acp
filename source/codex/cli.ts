@@ -135,9 +135,19 @@ function classifyRpcError(error: Record<string, unknown>): UsageError
     const code = asNumber(error.code);
     const message = asString(error.message) ?? "";
     if (code === -32601 || /method not found|not supported|unknown method/i.test(message))
-        return new UsageError(ConnectionState.Unsupported, "Codex app-server does not support a required read request.");
+    {
+        return new UsageError(
+            ConnectionState.Unsupported,
+            "Codex app-server does not support a required read request.",
+        );
+    }
     if (/auth|login|sign in/i.test(message))
-        return new UsageError(ConnectionState.AuthRequired, "Codex needs a ChatGPT login. Run `codex login`, then retry.");
+    {
+        return new UsageError(
+            ConnectionState.AuthRequired,
+            "Codex needs a ChatGPT login. Run `codex login`, then retry.",
+        );
+    }
     return new UsageError(ConnectionState.Unavailable, "Codex app-server could not read subscription usage.");
 }
 

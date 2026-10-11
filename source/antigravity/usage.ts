@@ -22,7 +22,12 @@ export function parseUsageReport(payload: unknown): UsageReport
     }
     const command = asRecord(root.command);
     if (asString(command?.name) !== "usage")
-        throw new UsageError(ConnectionState.Unsupported, "Antigravity CLI did not answer the usage command. Update the CLI, then retry.");
+    {
+        throw new UsageError(
+            ConnectionState.Unsupported,
+            "Antigravity CLI did not answer the usage command. Update the CLI, then retry.",
+        );
+    }
     const data = asRecord(command?.data) ?? asRecord(root.data);
     const groups = data === undefined || !Array.isArray(data.groups) ? [] : data.groups;
     if (groups.length === 0)
