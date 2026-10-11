@@ -58,11 +58,6 @@
         "category": "Devin Better ACP"
       },
       {
-        "command": "devinBetterACP.showDiagnostics",
-        "title": "Show Diagnostics",
-        "category": "Devin Better ACP"
-      },
-      {
         "command": "devinBetterACP.openChatGptUsage",
         "title": "Open ChatGPT Usage Page",
         "category": "Devin Better ACP"

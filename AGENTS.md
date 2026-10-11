@@ -46,8 +46,6 @@ devin-desktop --user-data-dir=/tmp/devin-better-acp-dev --extensions-dir=/tmp/de
   registry. It installs the Python shim and integration modules and atomically
   replaces matching agent entries while preserving unrelated entries; it never
   writes provider configuration or credentials.
-- Diagnostics stay redacted: provider name, CLI version, classified state,
-  timings, and successful-refresh age only.
 
 ## ACP shim
 

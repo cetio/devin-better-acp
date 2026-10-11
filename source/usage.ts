@@ -16,14 +16,6 @@ export type TimerHandle = {
     cancel: () => void;
 };
 
-export type RefreshInfo = {
-    provider: ProviderId;
-    state: ConnectionState;
-    message: string | undefined;
-    durationMs: number;
-    cliVersion: string | undefined;
-};
-
 export type UsageOptions = {
     intervalMs: number;
     staleAfterMs: number;
@@ -40,7 +32,6 @@ export type UsageServiceOptions = UsageOptions & {
     random: () => number;
     setTimeout: (callback: () => void, delayMs: number) => TimerHandle;
     onDidChange: () => void;
-    onRefresh: (info: RefreshInfo) => void;
 };
 
 type VersionVerdict = {
@@ -330,16 +321,7 @@ export class UsageService
             if (state.abort === abort)
                 state.abort = undefined;
             if (this.isCurrent(state, generation))
-            {
                 this.scheduleNext(state);
-                this.options.onRefresh({
-                    provider: state.setup.provider,
-                    state: state.status.state,
-                    message: state.status.message,
-                    durationMs: this.options.now() - startedAt,
-                    cliVersion: state.status.cliVersion,
-                });
-            }
             this.emit();
         }
     }

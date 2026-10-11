@@ -134,7 +134,6 @@ function callbacks(): PickerCallbacks & { refreshProvider: (provider: ProviderId
         retry: async () => undefined,
         configureCli: () => undefined,
         openSettings: () => undefined,
-        showDiagnostics: () => undefined,
         openChatGptUsage: () => undefined,
         setEnabled: () => undefined,
     };
@@ -193,7 +192,6 @@ test("management separates provider connections from general settings", () =>
     assert.ok(items.some((item) => item.action?.kind === "retry"));
     assert.ok(items.some((item) => item.action?.kind === "configureCli"));
     assert.ok(items.some((item) => item.action?.kind === "openChatGptUsage"));
-    assert.ok(items.some((item) => item.action?.kind === "showDiagnostics"));
 });
 
 test("picker items guide recovery for disabled and empty providers", () =>

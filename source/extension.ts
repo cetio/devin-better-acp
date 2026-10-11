@@ -2,7 +2,6 @@ import { installAntigravity, antigravityInstallPaths } from "./antigravity/insta
 import { isExecutableFile, resolveCli } from "./process/discovery";
 import { normalizeSettings, refreshIntervalMs, staleAfterMs, UsageSettings } from "./settings";
 import { UsageOptions, UsageService } from "./usage";
-import { Diagnostics } from "./diagnostics";
 import { PROVIDER_SPECS } from "./registry";
 import { UsagePicker, PickerFocus } from "./ui/picker";
 import { StatusBarView } from "./ui/status";
@@ -27,7 +26,6 @@ export type ExtensionApi = {
 export function activate(context: vscode.ExtensionContext): ExtensionApi
 {
     const storage = ensureStorage(join(context.globalStorageUri.fsPath, "work"));
-    const diagnostics = new Diagnostics();
     let settings = readSettings();
 
     const usage = new UsageService({
@@ -41,7 +39,6 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
             return { cancel: () => clearTimeout(handle) };
         },
         onDidChange: () => render(),
-        onRefresh: (info) => diagnostics.note(info),
     });
     const view = new StatusBarView(settings.alignment, settings.visibility);
     const picker = new UsagePicker({
@@ -50,7 +47,6 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
         retry: (provider) => usage.refresh(provider, { manual: true }),
         configureCli: (provider) => void configureCli(provider),
         openSettings: () => void vscode.commands.executeCommand("workbench.action.openSettings", SETTINGS_QUERY),
-        showDiagnostics: () => diagnostics.show(usage.getState()),
         openChatGptUsage: () => void vscode.env.openExternal(vscode.Uri.parse(CHATGPT_USAGE_URL)),
         setEnabled: (provider, enabled) => void updateSetting(`${provider}.enabled`, enabled),
     });
@@ -159,10 +155,6 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
         {
             void vscode.commands.executeCommand("workbench.action.openSettings", SETTINGS_QUERY);
         }),
-        vscode.commands.registerCommand("devinBetterACP.showDiagnostics", () =>
-        {
-            diagnostics.show(usage.getState());
-        }),
         vscode.commands.registerCommand("devinBetterACP.openChatGptUsage", () =>
         {
             void vscode.env.openExternal(vscode.Uri.parse(CHATGPT_USAGE_URL));
@@ -202,7 +194,6 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
                 usage.dispose();
                 picker.dispose();
                 view.dispose();
-                diagnostics.dispose();
             },
         },
     );

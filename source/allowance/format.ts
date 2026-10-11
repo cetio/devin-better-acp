@@ -115,14 +115,6 @@ export function formatCountdown(milliseconds: number): string
     return "<1m";
 }
 
-export function formatTimestamp(milliseconds: number): string
-{
-    const date = new Date(milliseconds);
-    const day = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-    const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
-    return `${day} ${time}`;
-}
-
 export function formatResetMoment(milliseconds: number): string
 {
     const date = new Date(milliseconds);
@@ -160,9 +152,4 @@ export function sanitizeLabel(text: string): string
 export function escapeMarkdown(text: string): string
 {
     return text.replace(/[\\`*_{}[\]()#+\-.!|<>~$]/g, "\\$&");
-}
-
-function pad(value: number): string
-{
-    return value.toString().padStart(2, "0");
 }

@@ -11,7 +11,6 @@ const COMMANDS = [
     "devinBetterACP.retry",
     "devinBetterACP.configureCli",
     "devinBetterACP.openSettings",
-    "devinBetterACP.showDiagnostics",
     "devinBetterACP.openChatGptUsage",
 ];
 

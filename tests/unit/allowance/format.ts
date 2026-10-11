@@ -10,7 +10,6 @@ import {
     formatCountdown,
     formatPercent,
     formatResetMoment,
-    formatTimestamp,
     remainingPercent,
     sanitizeLabel,
     windowAbbreviation,
@@ -88,12 +87,6 @@ test("countdown formatting is compact and honest at the boundary", () =>
     assert.equal(formatCountdown(30000), "<1m");
     assert.equal(formatCountdown(4 * 3600000 + 10 * 60000), "4h 10m");
     assert.equal(formatCountdown(3 * 86400000 + 4 * 3600000), "3d 4h");
-});
-
-test("timestamp formatting uses local calendar values", () =>
-{
-    const date = new Date(2030, 4, 9, 8, 7);
-    assert.equal(formatTimestamp(date.getTime()), "2030-05-09 08:07");
 });
 
 test("reset moments read like the native plan card", () =>

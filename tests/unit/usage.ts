@@ -98,7 +98,7 @@ function setup(adapter: ProviderAdapter | undefined, enabled = true): ProviderSe
 
 function makeUsage(
     timers: FakeTimers,
-    options: { intervalMs?: number; staleAfterMs?: number; onRefresh?: () => void } = {},
+    options: { intervalMs?: number; staleAfterMs?: number } = {},
 ): UsageService
 {
     return new UsageService({
@@ -108,7 +108,6 @@ function makeUsage(
         random: () => 0,
         setTimeout: timers.setTimeout,
         onDidChange: () => undefined,
-        onRefresh: () => options.onRefresh?.(),
     });
 }
 

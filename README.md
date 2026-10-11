@@ -76,7 +76,6 @@ until you retry. Monitoring is paused in untrusted workspaces.
 | `Devin Better ACP: Retry Connection` | Retry a provider, including the CLI version check |
 | `Devin Better ACP: Configure CLI Path` | Pick the CLI executable and store its absolute path |
 | `Devin Better ACP: Open Settings` | Open the extension settings |
-| `Devin Better ACP: Show Diagnostics` | Show classified provider state and recent refresh events |
 | `Devin Better ACP: Open ChatGPT Usage Page` | Open the account usage page for Codex |
 | `Devin Better ACP: Install Devin Better Antigravity` | Copy the ACP shim and update the local agent registry |
 

@@ -28,7 +28,6 @@ export type PickAction =
     | { kind: "retry"; provider: ProviderId }
     | { kind: "configureCli"; provider: ProviderId }
     | { kind: "openSettings" }
-    | { kind: "showDiagnostics" }
     | { kind: "openChatGptUsage" }
     | { kind: "enable"; provider: ProviderId };
 
@@ -55,7 +54,6 @@ export type PickerCallbacks = {
     retry: (provider: ProviderId) => Promise<void>;
     configureCli: (provider: ProviderId) => void;
     openSettings: () => void;
-    showDiagnostics: () => void;
     openChatGptUsage: () => void;
     setEnabled: (provider: ProviderId, enabled: boolean) => void;
 };
@@ -151,7 +149,7 @@ export function pickerItems(
     items.push(pick({
         id: "action.manage",
         label: "$(gear) Settings & connection…",
-        detail: "Reconnect, choose a CLI path, or view diagnostics",
+        detail: "Reconnect, choose a CLI path, or open settings",
         action: { kind: "manage" },
     }));
     return items;
@@ -185,11 +183,6 @@ export function managementItems(statuses: ProviderStatus[], focus?: PickerFocus)
     }
     items.push(separator("settings", "Settings"));
     items.push(pick({ id: "action.settings", label: "$(gear) Open settings", action: { kind: "openSettings" } }));
-    items.push(pick({
-        id: "action.diagnostics",
-        label: "$(output) Show diagnostics",
-        action: { kind: "showDiagnostics" },
-    }));
     return items;
 }
 
@@ -342,9 +335,7 @@ export class UsagePicker
         }
         catch
         {
-            void vscode.window.showErrorMessage(
-                "Devin Better ACP: refresh failed. See diagnostics for connection details.",
-            );
+            void vscode.window.showErrorMessage("Devin Better ACP: refresh failed.");
         }
         finally
         {
@@ -375,10 +366,6 @@ export class UsagePicker
             case "openSettings":
                 picker.hide();
                 this.callbacks.openSettings();
-                return;
-            case "showDiagnostics":
-                picker.hide();
-                this.callbacks.showDiagnostics();
                 return;
             case "openChatGptUsage":
                 picker.hide();
