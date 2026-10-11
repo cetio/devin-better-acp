@@ -1,5 +1,9 @@
 import { installAntigravity, antigravityInstallPaths } from "./antigravity/install";
-import { antigravityLaunchConfigPath, antigravityLaunchSettings, writeAntigravityLaunchSettings } from "./antigravity/config";
+import {
+    antigravityLaunchConfigPath,
+    antigravityLaunchSettings,
+    writeAntigravityLaunchSettings,
+} from "./antigravity/config";
 import type { AntigravityConfig } from "./antigravity/config";
 import { isExecutableFile } from "./cli";
 import { startPolling } from "./poll";

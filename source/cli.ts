@@ -357,7 +357,9 @@ function isInsideAny(path: string, parents: string[]): boolean
         if (parent.length === 0)
             continue;
         const childPath = relative(parent, path);
-        if (childPath.length === 0 || (childPath !== ".." && !childPath.startsWith(`..${sep}`) && !isAbsolute(childPath)))
+        if (childPath.length === 0)
+            return true;
+        if (childPath !== ".." && !childPath.startsWith(`..${sep}`) && !isAbsolute(childPath))
             return true;
     }
     return false;

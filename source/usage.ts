@@ -144,7 +144,8 @@ export class UsageService
                 continue;
             }
 
-            const changed = state.config.enabled !== providerConfig.enabled || state.config.path !== providerConfig.path;
+            const changed = state.config.enabled !== providerConfig.enabled
+                || state.config.path !== providerConfig.path;
             state.config = providerConfig;
             if (!changed)
                 continue;
