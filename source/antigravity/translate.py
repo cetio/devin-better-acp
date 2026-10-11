@@ -19,12 +19,10 @@ class Translator:
     def __init__(
         self,
         send: Callable,
-        log: Callable,
         spoof_zed: bool = False,
         devin_config: bool = False,
     ):
         self.send = send
-        self.log = log
         self.spoof_zed = spoof_zed
         self.devin_config = devin_config
         self.lock = threading.Lock()
@@ -78,10 +76,7 @@ class Translator:
     def session_new(self, parameters: dict, request_id: object) -> bool:
         ret = False
         if self.devin_config:
-            added = merge_mcp_servers(parameters)
-            if added:
-                self.log("shim", {"event": "devin_mcp_merge", "added": added})
-                ret = True
+            ret = bool(merge_mcp_servers(parameters))
         if self.form_elicitation is not None:
             ret = attach_integration(
                 parameters,
@@ -189,7 +184,6 @@ class Translator:
                         cancelled = any(self.prompt_sessions.get(request_id) == session_id
                                         for request_id in self.cancelled_prompts)
                     if cancelled:
-                        self.log("shim", {"event": "cancellation_message_suppressed", "sessionId": session_id})
                         return None
         if variant not in ("tool_call", "tool_call_update"):
             return False

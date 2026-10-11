@@ -106,7 +106,6 @@ export async function installAntigravity(
             "--server",
             paths.serverPath,
             "--spoof-zed",
-            "--debug",
             "--devin-config",
             "--system-prompt",
             "--",

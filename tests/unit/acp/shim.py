@@ -26,7 +26,6 @@ from source.antigravity.presentation.tools import ToolPresentation
 from source.mcp import commands, files, questions
 from source.mcp import server as integration
 from source.mcp import tools
-from source.antigravity.debug import LOG_LINE_BYTES
 from source.antigravity.translate import VERSION
 
 SHIM = ROOT / "source/antigravity/acp.py"
@@ -755,8 +754,7 @@ class ShimTests(unittest.TestCase):
         self.assertEqual(probe.receive(), {"jsonrpc": "2.0", "method": "test/cancelled", "params": parameters})
 
     def test_cancel_boilerplate_is_suppressed_but_partial_output_and_response_survive(self):
-        log = Path(self.directory.name) / "cancel.jsonl"
-        probe = self.probe(extra_args=["--debug-log", str(log)])
+        probe = self.probe()
         probe.send({
             "jsonrpc": "2.0",
             "id": "turn",
@@ -772,14 +770,6 @@ class ShimTests(unittest.TestCase):
         self.assertEqual(probe.receive(), {"jsonrpc": "2.0", "id": "turn", "result": {"stopReason": "cancelled"}})
         probe.send({"jsonrpc": "2.0", "id": "next", "method": "test/echo", "params": {}})
         self.assertEqual(probe.receive()["result"]["request"]["id"], "next")
-        probe.finish()
-        records = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertTrue(any(
-            record.get("dir") == "shim"
-            and record.get("msg", {}).get("event") == "cancellation_message_suppressed"
-            for record in records
-        ))
-        self.assertIn("The request was cancelled by the client.", log.read_text())
 
     def test_cancel_filter_is_scoped_to_an_active_prompt_and_session(self):
         for prompt_session, cancel_session, notice_session, suppressed in (
@@ -1316,49 +1306,6 @@ class ShimTests(unittest.TestCase):
         option = json.loads(bridge.from_agent(frame))["params"]["update"]["configOptions"][0]["options"][0]
         self.assertEqual(option["name"], "Bypass Permissions")
         self.assertEqual(option["_meta"]["cognition.ai/icon"], "provider-icon")
-
-    def test_debug_log_records_traffic_and_stderr(self):
-        log = Path(self.directory.name) / "debug.jsonl"
-        probe = self.probe(extra_args=["--debug", "--debug-log", str(log)])
-        probe.send(self.initialize())
-        probe.receive()
-        probe.send({"jsonrpc": "2.0", "id": 5, "method": "test/stderr", "params": {}})
-        probe.receive()
-        self.assertEqual(probe.finish(), 0)
-        records = [json.loads(line) for line in log.read_text().splitlines()]
-        directions = [record["dir"] for record in records]
-        self.assertEqual(directions.count("c2a"), 2)
-        self.assertGreaterEqual(directions.count("a2c"), 2)
-        self.assertIn("err", directions)
-        self.assertIn("initialize", [record.get("msg", {}).get("method") for record in records])
-        self.assertNotIn("PRIVATE_PROVIDER_DETAIL", log.read_text())
-        self.assertTrue(any(record["dir"] == "err" and record.get("bytes", 0) > 0 for record in records))
-
-    def test_debug_log_is_private_redacts_credentials_and_keeps_valid_bounded_jsonl(self):
-        log = Path(self.directory.name) / "private-debug.jsonl"
-        debug = shim.DebugLog(log)
-        debug.write({"dir": "c2a", "msg": {
-            "method": "session/new",
-            "params": {
-                "headers": {"Authorization": "Bearer PRIVATE_HEADER"},
-                "mcpServers": [{"name": "test", "env": [{"name": "API_TOKEN", "value": "PRIVATE_ENV_TOKEN"}]}],
-                "credential": "PRIVATE_CREDENTIAL",
-            },
-        }})
-        debug.write({"dir": "a2c", "msg": {
-            "method": "session/update",
-            "content": "x" * (LOG_LINE_BYTES + 1),
-        }})
-        debug.file.close()
-        content = log.read_text()
-        self.assertNotIn("PRIVATE_HEADER", content)
-        self.assertNotIn("PRIVATE_ENV_TOKEN", content)
-        self.assertNotIn("PRIVATE_CREDENTIAL", content)
-        records = [json.loads(line) for line in content.splitlines()]
-        self.assertEqual(records[1]["msg"]["event"], "frame_truncated")
-        self.assertLessEqual(max(map(len, content.splitlines())), LOG_LINE_BYTES)
-        if os.name == "posix":
-            self.assertEqual(log.stat().st_mode & 0o077, 0)
 
     def test_registry_entry_uses_an_https_icon_url(self):
         completed = subprocess.run(

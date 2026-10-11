@@ -10,7 +10,6 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from source.antigravity.bridge import Bridge
-from source.antigravity.debug import DEFAULT_DEBUG_LOG, DebugLog
 from source.antigravity.presentation.appearance import AGENT_TITLE
 from source.antigravity.translate import VERSION
 
@@ -24,7 +23,6 @@ def registry_entry(
     server_args: list[str],
     spoof_zed: bool,
     icon_url: str,
-    debug_log: Path | None,
     devin_config: bool,
     system_prompt: bool,
 ) -> dict:
@@ -37,10 +35,6 @@ def registry_entry(
     arguments = [str(Path(__file__).resolve()), "--server", str(server)]
     if spoof_zed:
         arguments.append("--spoof-zed")
-    if debug_log is not None:
-        arguments.append("--debug")
-        if debug_log != DEFAULT_DEBUG_LOG:
-            arguments.extend(["--debug-log", str(debug_log)])
     if devin_config:
         arguments.append("--devin-config")
     if system_prompt:
@@ -77,16 +71,6 @@ def main() -> int:
     )
     parser.add_argument("--spoof-zed", action="store_true", help="send clientInfo.name=zed only to Antigravity")
     parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="log redacted, bounded ACP traffic and stderr counts to a private file",
-    )
-    parser.add_argument(
-        "--debug-log",
-        type=Path,
-        help=f"debug log path, default {DEFAULT_DEBUG_LOG} (implies --debug)",
-    )
-    parser.add_argument(
         "--devin-config",
         action="store_true",
         help="merge MCP servers from .devin and ~/.config/devin into session/new and session/load",
@@ -113,9 +97,6 @@ def main() -> int:
     server_args = arguments.server_args
     if server_args[:1] == ["--"]:
         server_args = server_args[1:]
-    debug_log = arguments.debug_log.expanduser() if arguments.debug_log else (
-        DEFAULT_DEBUG_LOG if arguments.debug else None
-    )
     if arguments.registry_entry:
         try:
             print(json.dumps(registry_entry(
@@ -123,25 +104,16 @@ def main() -> int:
                 server_args,
                 arguments.spoof_zed,
                 arguments.icon_url,
-                debug_log,
                 arguments.devin_config,
                 arguments.system_prompt,
             ), indent=2))
         except ValueError as error:
             parser.error(str(error))
         return 0
-    debug = None
-    if debug_log is not None:
-        try:
-            debug = DebugLog(debug_log)
-        except OSError as error:
-            print(f"Antigravity ACP shim: cannot open debug log (errno {error.errno}).", file=sys.stderr)
-            return 1
     return Bridge(
         server.resolve(),
         server_args,
         arguments.spoof_zed,
-        debug,
         arguments.devin_config,
         arguments.system_prompt,
     ).run()

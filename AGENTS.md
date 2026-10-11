@@ -104,10 +104,6 @@ connector behaviors to this agent. Server arguments follow `--`.
 The shim identifies itself in-band as `Antigravity (DBA)`, appending a
 `+devin-shim` version suffix to the upstream version. Upstream slash commands
 pass through unchanged; there is no local `/devin-shim` command.
-`--debug`/`--debug-log` writes
-bounded JSONL traces to `~/.local/state/devin-better-acp/antigravity-acp.jsonl`:
-files are mode `0600`, credential/header/environment fields are redacted, and
-upstream stderr is counted but never recorded as text.
 `--devin-config` merges MCP servers from `<workspace>/.devin/mcp_config*.json`,
 `<workspace>/.devin/config.json`, and `~/.config/devin/` (JSONC tolerated) into
 `session/new` and `session/load`, so Antigravity sees the same tools as Devin

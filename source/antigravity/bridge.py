@@ -1,4 +1,3 @@
-from .debug import DebugLog
 from .prompt import launch_copy
 from .protocol import ProtocolError, decode_frame, dump, read_frame
 from .translate import Translator
@@ -23,13 +22,11 @@ class Bridge:
         server: Path,
         server_args: list[str],
         spoof_zed: bool = False,
-        debug: DebugLog | None = None,
         devin_config: bool = False,
         system_prompt: bool = False,
     ):
         self.server = server
         self.server_args = server_args
-        self.debug = debug
         self.system_prompt = system_prompt
         self.stopped = threading.Event()
         self.client_closed = threading.Event()
@@ -40,17 +37,12 @@ class Bridge:
         self.process: subprocess.Popen | None = None
         self.client_out: BinaryIO | None = None
         self.out_lock = threading.Lock()
-        self.translation = Translator(self.send_message, self.log, spoof_zed, devin_config)
-
-    def log(self, direction: str, message: object) -> None:
-        if self.debug is not None:
-            self.debug.write({"dir": direction, "msg": message})
+        self.translation = Translator(self.send_message, spoof_zed, devin_config)
 
     def fail(self, message: str) -> None:
         with self.lock:
             if self.failure is None:
                 self.failure = message
-        self.log("sys", {"event": "failure", "detail": message})
         self.stopped.set()
 
     def interrupt(self, signum: int, frame: object) -> None:
@@ -71,13 +63,11 @@ class Bridge:
 
     def from_client(self, frame: bytes) -> bytes | None:
         message = decode_frame(frame)
-        self.log("c2a", message)
         changed = self.translation.from_client(message)
         return None if changed is None else (dump(message) if changed else frame)
 
     def from_agent(self, frame: bytes) -> bytes | None:
         message = decode_frame(frame)
-        self.log("a2c", message)
         changed = self.translation.from_agent(message)
         return None if changed is None else (dump(message) if changed else frame)
 
@@ -116,9 +106,8 @@ class Bridge:
             self.stopped.set()
 
     def drain_stderr(self, process: subprocess.Popen) -> None:
-        while chunk := process.stderr.read(8192):
-            if self.debug is not None:
-                self.debug.write({"dir": "err", "bytes": len(chunk)})
+        while process.stderr.read(8192):
+            pass
 
     def run(self) -> int:
         try:
@@ -154,8 +143,6 @@ class Bridge:
             return 1
         self.process = process
         self.client_out = os.fdopen(os.dup(sys.stdout.fileno()), "wb")
-        self.log("sys", {"event": "spawn", "server": str(self.server), "pid": process.pid,
-                         "systemPrompt": self.system_prompt})
         client = threading.Thread(target=self.copy_client, args=(process,), daemon=True)
         agent = threading.Thread(target=self.copy_agent, args=(process,), daemon=True)
         stderr = threading.Thread(target=self.drain_stderr, args=(process,), daemon=True)
@@ -182,7 +169,6 @@ class Bridge:
             self.translation.integration.close()
             agent.join(timeout=KILL_GRACE_SECONDS)
             stderr.join(timeout=KILL_GRACE_SECONDS)
-            self.log("sys", {"event": "exit", "code": process.poll()})
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
         if self.failure is not None:
