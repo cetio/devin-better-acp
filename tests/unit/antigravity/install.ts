@@ -71,6 +71,8 @@ test("the install command deploys the Python package and atomically updates the 
     const registryPath = join(directory, "config", "registry.json");
     const installDirectory = join(directory, "install");
     writeFileSync(serverPath, "server");
+    mkdirSync(join(installDirectory, "source", "antigravity"), { recursive: true });
+    writeFileSync(join(installDirectory, "source", "antigravity", "presentation.py"), "previous module");
     mkdirSync(join(directory, "config"), { recursive: true });
     writeFileSync(registryPath, JSON.stringify({
         version: "1.0.0",
@@ -80,7 +82,8 @@ test("the install command deploys the Python package and atomically updates the 
     const python = writeScript(
         directory,
         "python.cjs",
-        `process.stdout.write(${JSON.stringify(JSON.stringify(registryEntry()))});`,
+        `if (!process.argv.includes("--system-prompt")) process.exit(3);
+        process.stdout.write(${JSON.stringify(JSON.stringify(registryEntry()))});`,
     );
 
     const installed = await installAntigravity(
@@ -113,7 +116,24 @@ test("the install command deploys the Python package and atomically updates the 
         );
     }
     assert.equal(statSync(join(installedRoot, "antigravity", "acp.py")).mode & 0o777, 0o755);
-    assert.equal(statSync(join(installedRoot, "antigravity", "integration.py")).mode & 0o777, 0o755);
+    for (const moduleName of readdirSync(join(sourceRoot, "antigravity", "presentation"))
+        .filter((name) => name.endsWith(".py")))
+    {
+        assert.equal(
+            readFileSync(join(installedRoot, "antigravity", "presentation", moduleName), "utf8"),
+            readFileSync(join(sourceRoot, "antigravity", "presentation", moduleName), "utf8"),
+        );
+    }
+    assert.equal(readdirSync(join(installedRoot, "antigravity")).includes("presentation.py"), false);
+    for (const moduleName of readdirSync(join(sourceRoot, "mcp")).filter((name) => name.endsWith(".py")))
+    {
+        assert.equal(
+            readFileSync(join(installedRoot, "mcp", moduleName), "utf8"),
+            readFileSync(join(sourceRoot, "mcp", moduleName), "utf8"),
+        );
+    }
+
+    assert.equal(statSync(join(installedRoot, "mcp", "server.py")).mode & 0o777, 0o755);
     assert.equal(statSync(registryPath).mode & 0o777, 0o600);
 
     const registry = JSON.parse(readFileSync(registryPath, "utf8")) as {
