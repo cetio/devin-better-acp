@@ -814,6 +814,92 @@ class ShimTests(unittest.TestCase):
         self.assertNotIn(("fixture", "/fixture/file.txt"), bridge.read_calls)
         self.assertNotIn("read", bridge.read_requests)
 
+    def test_devin_picker_model_ids_round_trip_to_provider_values(self):
+        bridge = self.shim.Bridge(Path(sys.executable), [], False)
+        bridge.pending["new-session"] = "session/new"
+        response = {
+            "jsonrpc": "2.0",
+            "id": "new-session",
+            "result": {
+                "sessionId": "fixture",
+                "configOptions": [{
+                    "id": "model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "gemini-3.6-flash-low",
+                    "options": [
+                        {"value": "gemini-3.6-flash-low", "name": "Gemini 3.6 Flash Low"},
+                        {"value": "gemini-3-flash-high", "name": "Gemini 3 Flash High"},
+                        {"value": "claude-opus-4.6-thinking", "name": "Claude Opus 4.6 Thinking"},
+                        {"value": "gpt-oss-120b", "name": "GPT OSS 120B"},
+                    ],
+                }],
+            },
+        }
+        translated = json.loads(bridge.from_agent(self.shim.dump(response)))
+        option = translated["result"]["configOptions"][0]
+        self.assertEqual(option["currentValue"], "gemini-3-6-flash-low")
+        self.assertEqual([item["value"] for item in option["options"]], [
+            "gemini-3-6-flash-low",
+            "MODEL_GOOGLE_GEMINI_3_0_FLASH_HIGH",
+            "claude-opus-4-6-thinking",
+            "gpt-oss-120b",
+        ])
+
+        request = self.shim.dump({
+            "jsonrpc": "2.0",
+            "id": "switch",
+            "method": "session/set_config_option",
+            "params": {"sessionId": "fixture", "configId": "model", "value": "gemini-3-6-flash-low"},
+        })
+        forwarded = json.loads(bridge.from_client(request))
+        self.assertEqual(forwarded["params"]["value"], "gemini-3.6-flash-low")
+
+        flash_request = self.shim.dump({
+            "jsonrpc": "2.0",
+            "id": "switch-flash",
+            "method": "session/set_config_option",
+            "params": {
+                "sessionId": "fixture",
+                "configId": "model",
+                "value": "MODEL_GOOGLE_GEMINI_3_0_FLASH_HIGH",
+            },
+        })
+        flash_forwarded = json.loads(bridge.from_client(flash_request))
+        self.assertEqual(flash_forwarded["params"]["value"], "gemini-3-flash-high")
+
+    def test_devin_picker_remaps_model_option_updates(self):
+        bridge = self.shim.Bridge(Path(sys.executable), [], False)
+        frame = self.shim.dump({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "fixture",
+                "update": {
+                    "sessionUpdate": "config_option_update",
+                    "configOptions": [{
+                        "id": "model",
+                        "category": "model",
+                        "type": "select",
+                        "currentValue": "gemini-3.8-flash-high",
+                        "options": [{"value": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash High"}],
+                    }],
+                },
+            },
+        })
+        translated = json.loads(bridge.from_agent(frame))
+        option = translated["params"]["update"]["configOptions"][0]
+        self.assertEqual(option["currentValue"], "gemini-3-8-flash-high")
+        self.assertEqual(option["options"][0]["value"], "gemini-3-8-flash-high")
+        request = self.shim.dump({
+            "jsonrpc": "2.0",
+            "id": "switch",
+            "method": "session/set_config_option",
+            "params": {"sessionId": "fixture", "configId": "model", "value": "gemini-3-8-flash-high"},
+        })
+        forwarded = json.loads(bridge.from_client(request))
+        self.assertEqual(forwarded["params"]["value"], "gemini-3.8-flash-high")
+
     def test_native_mode_labels_and_icons_preserve_wire_values(self):
         bridge = self.shim.Bridge(Path(sys.executable), [], False)
         payload = {
@@ -925,7 +1011,7 @@ class ShimTests(unittest.TestCase):
             check=True,
         )
         entry = json.loads(completed.stdout)
-        self.assertEqual(entry["id"], "antigravity-devin")
+        self.assertEqual(entry["id"], "devin-better-antigravity")
         self.assertTrue(entry["icon"].startswith("https://"))
         self.assertIn("antigravity-acp.svg", entry["icon"])
         icon = (ROOT / "images/antigravity-acp.svg").read_text()

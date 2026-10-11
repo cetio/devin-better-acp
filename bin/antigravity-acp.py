@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import signal
 import subprocess
 import sys
@@ -337,6 +338,63 @@ def stop_child(process: subprocess.Popen) -> None:
         signal_child(process, True)
 
 
+def devin_model_uid(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    gemini_flash = re.fullmatch(r"gemini-3(?:\.0)?-flash-(minimal|low|medium|high)", value)
+    if gemini_flash is not None:
+        return f"MODEL_GOOGLE_GEMINI_3_0_FLASH_{gemini_flash.group(1).upper()}"
+    return re.sub(r"(?<=\d)\.(?=\d)", "-", value)
+
+
+def model_option_entries(options: list) -> list[dict]:
+    ret: list[dict] = []
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        nested = option.get("options")
+        if "group" in option and isinstance(nested, list):
+            ret.extend(model_option_entries(nested))
+        else:
+            ret.append(option)
+    return ret
+
+
+def remap_model_option_values(config_option: dict) -> tuple[dict[str, str], bool]:
+    options = config_option.get("options")
+    if not isinstance(options, list):
+        return {}, False
+    entries = model_option_entries(options)
+    provider_values = {
+        option["value"] for option in entries
+        if isinstance(option.get("value"), str)
+    }
+    aliases: dict[str, set[str]] = {}
+    for option in entries:
+        provider_value = option.get("value")
+        model_uid = devin_model_uid(provider_value)
+        if model_uid is not None and model_uid != provider_value:
+            aliases.setdefault(model_uid, set()).add(provider_value)
+    ret: dict[str, str] = {}
+    for model_uid, provider_candidates in aliases.items():
+        if len(provider_candidates) == 1 and model_uid not in provider_values:
+            ret[model_uid] = next(iter(provider_candidates))
+    provider_to_devin = {provider_value: model_uid for model_uid, provider_value in ret.items()}
+    changed = False
+    for option in entries:
+        provider_value = option.get("value")
+        model_uid = provider_to_devin.get(provider_value)
+        if model_uid is not None:
+            option["value"] = model_uid
+            changed = True
+    current_value = config_option.get("currentValue")
+    model_uid = provider_to_devin.get(current_value)
+    if model_uid is not None:
+        config_option["currentValue"] = model_uid
+        changed = True
+    return ret, changed
+
+
 class Bridge:
     def __init__(
         self,
@@ -358,6 +416,8 @@ class Bridge:
         self.lock = threading.Lock()
         self.interrupted = False
         self.pending: dict[int | str, str] = {}
+        self.pending_sessions: dict[int | str, str] = {}
+        self.model_value_maps: dict[str, dict[str, dict[str, str]]] = {}
         self.prompt_sessions: dict[int | str, str] = {}
         self.cancelled_prompts: set[int | str] = set()
         self.read_requests: dict[int | str, tuple[str, str]] = {}
@@ -374,6 +434,24 @@ class Bridge:
     def log(self, direction: str, message: object) -> None:
         if self.debug is not None:
             self.debug.write({"dir": direction, "msg": message})
+
+    def decorate_model_config_options(self, payload: dict, session_id: object) -> bool:
+        config_options = payload.get("configOptions")
+        if not isinstance(session_id, str) or not isinstance(config_options, list):
+            return False
+        ret = False
+        with self.lock:
+            session_maps = self.model_value_maps.setdefault(session_id, {})
+            for config_option in config_options:
+                if not isinstance(config_option, dict) or config_option.get("category") != "model":
+                    continue
+                config_id = config_option.get("id")
+                if not isinstance(config_id, str):
+                    continue
+                value_map, changed = remap_model_option_values(config_option)
+                session_maps[config_id] = value_map
+                ret = ret or changed
+        return ret
 
     def fail(self, message: str) -> None:
         with self.lock:
@@ -582,13 +660,26 @@ class Bridge:
                 return None
             self.emit_session_title(message)
         parameters = message.get("params")
+        model_value_changed = False
+        if message.get("method") == "session/set_config_option" and isinstance(parameters, dict):
+            session_id = parameters.get("sessionId")
+            config_id = parameters.get("configId")
+            model_uid = parameters.get("value")
+            if isinstance(session_id, str) and isinstance(config_id, str) and isinstance(model_uid, str):
+                with self.lock:
+                    provider_value = self.model_value_maps.get(session_id, {}).get(config_id, {}).get(model_uid)
+                if provider_value is not None:
+                    parameters["value"] = provider_value
+                    model_value_changed = provider_value != model_uid
         if "method" in message and message.get("id") is not None:
             with self.lock:
                 self.pending[message["id"]] = message["method"]
-                if message["method"] == "session/prompt" and isinstance(parameters, dict):
+                if isinstance(parameters, dict):
                     session_id = parameters.get("sessionId")
                     if isinstance(session_id, str):
-                        self.prompt_sessions[message["id"]] = session_id
+                        self.pending_sessions[message["id"]] = session_id
+                        if message["method"] == "session/prompt":
+                            self.prompt_sessions[message["id"]] = session_id
         if message.get("method") == "session/cancel" and isinstance(parameters, dict):
             session_id = parameters.get("sessionId")
             with self.lock:
@@ -610,7 +701,7 @@ class Bridge:
                 if added:
                     self.log("shim", {"event": "devin_mcp_merge", "added": added})
                     return dump(message)
-        return frame
+        return dump(message) if model_value_changed else frame
 
     def from_agent(self, frame: bytes) -> bytes | None:
         message = decode_frame(frame)
@@ -620,6 +711,7 @@ class Bridge:
             request_id = message.get("id")
             with self.lock:
                 method = self.pending.pop(request_id, None)
+                request_session_id = self.pending_sessions.pop(request_id, None)
                 session_id = self.prompt_sessions.pop(request_id, None)
                 cancelled = request_id in self.cancelled_prompts
                 self.cancelled_prompts.discard(request_id)
@@ -639,8 +731,17 @@ class Bridge:
                     "errorCode": error.get("code") if isinstance(error, dict) else None,
                 })
             result = message.get("result")
-            decorated = isinstance(result, dict) and decorate_modes(result)
-            if decorated:
+            model_decorated = False
+            if isinstance(result, dict) and method in (
+                "session/new", "session/load", "session/resume", "session/set_config_option",
+            ):
+                result_session_id = result.get("sessionId")
+                if not isinstance(result_session_id, str):
+                    result_session_id = request_session_id
+                model_decorated = self.decorate_model_config_options(result, result_session_id)
+            modes_decorated = isinstance(result, dict) and decorate_modes(result)
+            decorated = model_decorated or modes_decorated
+            if modes_decorated:
                 self.log("shim", {"event": "mode_presentation", "requestId": request_id})
             if method == "initialize":
                 if isinstance(result, dict):
@@ -662,9 +763,14 @@ class Bridge:
             if not isinstance(update, dict):
                 return frame
             kind = update.get("sessionUpdate")
-            if kind == "config_option_update" and decorate_modes(update):
-                self.log("shim", {"event": "mode_presentation", "sessionId": message["params"].get("sessionId")})
-                return dump(message)
+            if kind == "config_option_update":
+                session_id = message["params"].get("sessionId")
+                model_decorated = self.decorate_model_config_options(update, session_id)
+                modes_decorated = decorate_modes(update)
+                if modes_decorated:
+                    self.log("shim", {"event": "mode_presentation", "sessionId": session_id})
+                if model_decorated or modes_decorated:
+                    return dump(message)
             content = update.get("content")
             if kind == "agent_message_chunk" and isinstance(content, dict) and content.get("type") == "text":
                 if content.get("text") == "The request was cancelled by the client.":
@@ -846,7 +952,7 @@ def registry_entry(
     if server_args:
         arguments.extend(["--", *server_args])
     return {
-        "id": "antigravity-devin",
+        "id": "devin-better-antigravity",
         "name": AGENT_TITLE,
         "version": VERSION,
         "description": "Antigravity ACP bridge for Devin Desktop with optional Zed client compatibility.",

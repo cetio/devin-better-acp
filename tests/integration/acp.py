@@ -313,7 +313,7 @@ def main() -> int:
         parser.error("pass --run-live only when a live provider session has been explicitly authorized")
     if arguments.registry:
         registry = json.loads(arguments.registry.read_text())
-        entry = next(agent for agent in registry["agents"] if agent["id"] == "antigravity-devin")
+        entry = next(agent for agent in registry["agents"] if agent["id"] == "devin-better-antigravity")
         architecture = "aarch64" if platform.machine().lower() in ("aarch64", "arm64") else "x86_64"
         launch = entry["distribution"]["binary"][f"linux-{architecture}"]
     else:
