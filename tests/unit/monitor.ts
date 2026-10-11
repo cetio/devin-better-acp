@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { AdapterError, AdapterResult, ProviderAdapter, ProviderSetup } from "../../source/providers/adapter";
+import { AdapterError, AdapterResult, ProviderAdapter, ProviderSetup } from "../../source/adapter";
 import { ConnectionState } from "../../source/allowance/model";
 import { UsageController, TimerHandle } from "../../source/monitor";
 import { Version } from "../../source/process/version";

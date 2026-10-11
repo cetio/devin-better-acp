@@ -8,8 +8,8 @@ import {
     ProviderInvocation,
     classifyExit,
     probeVersion,
-} from "./adapter";
-import { asNumber, asRecord, asString } from "./envelope";
+} from "../adapter";
+import { asNumber, asRecord, asString } from "../envelope";
 
 const MAX_STDOUT_BYTES = 1024 * 1024;
 const TOKEN_COUNTER_KEYS = ["input_tokens", "output_tokens", "thinking_tokens", "cache_read_tokens", "total_tokens"];
@@ -121,9 +121,7 @@ export function parseUsageReport(payload: unknown, observedAt: number): AdapterR
     if (pools.size === 0)
         throw new AdapterError(ConnectionState.Unavailable, "Antigravity reported no usable quota windows.");
     const ordered = [...pools.values()].sort((left, right) =>
-    {
-        return poolRank(left.id) - poolRank(right.id) || left.id.localeCompare(right.id);
-    });
+        poolRank(left.id) - poolRank(right.id) || left.id.localeCompare(right.id));
     for (const pool of ordered)
         pool.windows.sort(compareWindows);
     return { observedAt, pools: ordered, metadata: [] };

@@ -8,8 +8,8 @@ import {
     ProviderInvocation,
     classifyExit,
     probeVersion,
-} from "./adapter";
-import { asNumber, asRecord, asString } from "./envelope";
+} from "../adapter";
+import { asNumber, asRecord, asString } from "../envelope";
 
 const CLIENT_NAME = "devinBetterACP";
 const CLIENT_TITLE = "Devin Better ACP";

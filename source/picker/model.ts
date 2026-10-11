@@ -64,9 +64,7 @@ export function pickerItems(
     for (const status of scopedStatuses(statuses, focus))
     {
         const pools = (status.snapshot?.pools ?? []).filter((pool) =>
-        {
-            return pool.windows.length > 0 && (focus === undefined || pool.id === focus.poolId);
-        });
+            pool.windows.length > 0 && (focus === undefined || pool.id === focus.poolId));
         if (pools.length === 0 || status.state === ConnectionState.Disabled)
         {
             items.push(separator(`provider.${status.provider}`, focus === undefined ? status.label : "Allowance"));

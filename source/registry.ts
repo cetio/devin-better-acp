@@ -1,7 +1,7 @@
-import { ProviderId } from "../allowance/model";
+import { ProviderId } from "./allowance/model";
 import { ProviderAdapter, ProviderInvocation } from "./adapter";
-import { createAntigravityAdapter } from "./antigravity";
-import { createCodexAdapter } from "./codex";
+import { createAntigravityAdapter } from "./antigravity/usage";
+import { createCodexAdapter } from "./codex/usage";
 
 export type ProviderSpec = {
     id: ProviderId;
@@ -19,7 +19,7 @@ export const PROVIDER_SPECS: ProviderSpec[] = [
         command: "codex",
         readArgs: ["app-server", "--stdio"],
         timeoutMs: 30000,
-        create: (invocation, clientVersion) => createCodexAdapter(invocation, clientVersion),
+        create: createCodexAdapter,
     },
     {
         id: "antigravity",
@@ -27,6 +27,6 @@ export const PROVIDER_SPECS: ProviderSpec[] = [
         command: "agy",
         readArgs: ["--print", "/usage", "--output-format", "json", "--print-timeout", "20s", "--mode", "plan"],
         timeoutMs: 30000,
-        create: (invocation) => createAntigravityAdapter(invocation),
+        create: createAntigravityAdapter,
     },
 ];

@@ -1,4 +1,3 @@
-import importlib.util
 import io
 import json
 import os
@@ -12,8 +11,14 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
-SHIM = ROOT / "bin/antigravity-acp.py"
-INTEGRATION = ROOT / "bin/devin-better-integration.py"
+sys.path.insert(0, str(ROOT))
+
+from source.antigravity import bridge as shim
+from source.antigravity import integration
+from source.antigravity.debug import LOG_LINE_BYTES
+
+SHIM = ROOT / "source/antigravity/acp.py"
+INTEGRATION = ROOT / "source/antigravity/integration.py"
 FIXTURE = """
 import json
 import os
@@ -136,15 +141,6 @@ class Probe:
 
 
 class ShimTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        specification = importlib.util.spec_from_file_location("antigravity_shim", SHIM)
-        cls.shim = importlib.util.module_from_spec(specification)
-        specification.loader.exec_module(cls.shim)
-        integration_specification = importlib.util.spec_from_file_location("devin_better_integration", INTEGRATION)
-        cls.integration = importlib.util.module_from_spec(integration_specification)
-        integration_specification.loader.exec_module(cls.integration)
-
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="acp shim ")
         self.addCleanup(self.directory.cleanup)
@@ -201,9 +197,9 @@ class ShimTests(unittest.TestCase):
         self.assertEqual(servers.count(client_server), 1)
 
     def test_integration_mcp_server_requires_form_elicitation_capability(self):
-        bridge = self.shim.Bridge(Path(sys.executable), [], False)
+        bridge = shim.Bridge(Path(sys.executable), [], False)
         request = self.session_new(Path(self.directory.name))
-        forwarded = bridge.from_client(self.shim.dump(request))
+        forwarded = bridge.from_client(shim.dump(request))
         self.assertEqual(json.loads(forwarded)["params"], request["params"])
         self.assertIsNone(bridge.integration_server)
 
@@ -213,29 +209,29 @@ class ShimTests(unittest.TestCase):
             "method": "initialize",
             "params": {"clientCapabilities": {"elicitation": {"form": {}}}},
         }
-        bridge.from_client(self.shim.dump(initialize))
+        bridge.from_client(shim.dump(initialize))
         request["id"] = 2
-        forwarded = json.loads(bridge.from_client(self.shim.dump(request)))
+        forwarded = json.loads(bridge.from_client(shim.dump(request)))
         servers = forwarded["params"]["mcpServers"]
         entry = next(server for server in servers if server["name"] == "devin-better-integration")
         environment = {item["name"]: item["value"] for item in entry["env"]}
         self.assertEqual(entry["args"], [str(INTEGRATION), "serve"])
         self.assertTrue(Path(environment["DBA_INTEGRATION_SOCKET"]).exists())
         self.assertEqual(len(environment["DBA_INTEGRATION_TOKEN"]), 43)
-        bridge.from_agent(self.shim.dump({
+        bridge.from_agent(shim.dump({
             "jsonrpc": "2.0", "id": 2, "result": {"sessionId": "fixture-session"},
         }))
         self.assertEqual(bridge.integration_sessions[environment["DBA_INTEGRATION_TOKEN"]], "fixture-session")
         bridge.stop_integration_server()
 
     def test_integration_mcp_server_respects_client_name_conflicts(self):
-        bridge = self.shim.Bridge(Path(sys.executable), [], False)
+        bridge = shim.Bridge(Path(sys.executable), [], False)
         bridge.form_elicitation = True
         request = self.session_new(Path(self.directory.name), [{
             "name": "devin-better-integration", "command": "client-owned",
         }])
         request["id"] = 3
-        forwarded = bridge.from_client(self.shim.dump(request))
+        forwarded = bridge.from_client(shim.dump(request))
         self.assertEqual(json.loads(forwarded)["params"], request["params"])
         self.assertIsNone(bridge.integration_server)
 
@@ -256,11 +252,11 @@ class ShimTests(unittest.TestCase):
         self.assertEqual([tool["name"] for tool in responses[1]["result"]["tools"]], ["ask_user_question"])
 
     def test_integration_question_round_trips_through_acp_elicitation(self):
-        bridge = self.shim.Bridge(Path(sys.executable), [], False)
+        bridge = shim.Bridge(Path(sys.executable), [], False)
         self.addCleanup(bridge.stop_integration_server)
         outbound = queue.Queue()
         bridge.send_client = outbound.put
-        bridge.from_client(self.shim.dump({
+        bridge.from_client(shim.dump({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
@@ -268,11 +264,11 @@ class ShimTests(unittest.TestCase):
         }))
         new_session = self.session_new(Path(self.directory.name))
         new_session["id"] = 2
-        request = json.loads(bridge.from_client(self.shim.dump(new_session)))
+        request = json.loads(bridge.from_client(shim.dump(new_session)))
         entry = next(server for server in request["params"]["mcpServers"]
                      if server["name"] == "devin-better-integration")
         environment = {item["name"]: item["value"] for item in entry["env"]}
-        bridge.from_agent(self.shim.dump({
+        bridge.from_agent(shim.dump({
             "jsonrpc": "2.0", "id": 2, "result": {"sessionId": "fixture-session"},
         }))
         arguments = {"questions": [
@@ -292,12 +288,12 @@ class ShimTests(unittest.TestCase):
             },
         ]}
         result_queue = queue.Queue()
-        integration_bridge = self.integration.IntegrationBridge(
+        integration_bridge = integration.IntegrationBridge(
             environment["DBA_INTEGRATION_SOCKET"], environment["DBA_INTEGRATION_TOKEN"],
         )
 
         def call_integration_tool():
-            result_queue.put(self.integration.handle_message({
+            result_queue.put(integration.handle_message({
                 "jsonrpc": "2.0",
                 "id": "question-call",
                 "method": "tools/call",
@@ -313,7 +309,7 @@ class ShimTests(unittest.TestCase):
         self.assertEqual(elicitation["params"]["requestedSchema"]["properties"]["question_1"]["enum"], [
             "Simple", "Broad", "Other",
         ])
-        self.assertIsNone(bridge.from_client(self.shim.dump({
+        self.assertIsNone(bridge.from_client(shim.dump({
             "jsonrpc": "2.0",
             "id": elicitation["id"],
             "result": {
@@ -469,7 +465,7 @@ class ShimTests(unittest.TestCase):
         del request["params"]["clientInfo"]
         probe.send(request)
         info = probe.receive()["result"]["request"]["params"]["clientInfo"]
-        self.assertEqual(info, {"name": "zed", "version": self.shim.VERSION})
+        self.assertEqual(info, {"name": "zed", "version": shim.VERSION})
 
     def test_cwd_mcp_servers_and_extensions_are_unchanged(self):
         probe = self.probe(True)
@@ -588,18 +584,18 @@ class ShimTests(unittest.TestCase):
             (None, "idle", "idle", False),
         ):
             with self.subTest(prompt=prompt_session, cancel=cancel_session, notice=notice_session):
-                bridge = self.shim.Bridge(Path(sys.executable), [], False)
+                bridge = shim.Bridge(Path(sys.executable), [], False)
                 if prompt_session is not None:
-                    bridge.from_client(self.shim.dump({
+                    bridge.from_client(shim.dump({
                         "jsonrpc": "2.0",
                         "id": 1,
                         "method": "session/prompt",
                         "params": {"sessionId": prompt_session, "prompt": []},
                     }))
-                bridge.from_client(self.shim.dump({
+                bridge.from_client(shim.dump({
                     "jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": cancel_session},
                 }))
-                frame = self.shim.dump({
+                frame = shim.dump({
                     "jsonrpc": "2.0",
                     "method": "session/update",
                     "params": {"sessionId": notice_session, "update": {
@@ -619,19 +615,19 @@ class ShimTests(unittest.TestCase):
             {"error": {"code": -32000, "message": "fixture failure"}},
         ):
             with self.subTest(response=response):
-                bridge = self.shim.Bridge(Path(sys.executable), [], False)
-                request = self.shim.dump({
+                bridge = shim.Bridge(Path(sys.executable), [], False)
+                request = shim.dump({
                     "jsonrpc": "2.0",
                     "id": "turn",
                     "method": "session/prompt",
                     "params": {"sessionId": "fixture", "prompt": []},
                 })
                 bridge.from_client(request)
-                bridge.from_client(self.shim.dump({
+                bridge.from_client(shim.dump({
                     "jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "fixture"},
                 }))
                 for text in ("More partial output", "Output: The request was cancelled by the client."):
-                    frame = self.shim.dump({
+                    frame = shim.dump({
                         "jsonrpc": "2.0",
                         "method": "session/update",
                         "params": {"sessionId": "fixture", "update": {
@@ -639,10 +635,10 @@ class ShimTests(unittest.TestCase):
                         }},
                     })
                     self.assertEqual(bridge.from_agent(frame), frame)
-                completed = self.shim.dump({"jsonrpc": "2.0", "id": "turn", **response})
+                completed = shim.dump({"jsonrpc": "2.0", "id": "turn", **response})
                 self.assertEqual(bridge.from_agent(completed), completed)
                 bridge.from_client(request)
-                notice = self.shim.dump({
+                notice = shim.dump({
                     "jsonrpc": "2.0",
                     "method": "session/update",
                     "params": {"sessionId": "fixture", "update": {
@@ -685,12 +681,12 @@ class ShimTests(unittest.TestCase):
             os.kill(pid, 0)
 
     def test_frame_limit_and_json_rpc_shape_are_checked(self):
-        with self.assertRaises(self.shim.ProtocolError):
-            self.shim.read_frame(io.BytesIO(b"x" * 65), 64)
+        with self.assertRaises(shim.ProtocolError):
+            shim.read_frame(io.BytesIO(b"x" * 65), 64)
         for frame in (b"[]\n", b'{"jsonrpc":"1.0"}\n', b'{"jsonrpc":"2.0","result":1}\n'):
-            with self.subTest(frame=frame), self.assertRaises(self.shim.ProtocolError):
-                self.shim.decode_frame(frame)
-        self.assertEqual(self.shim.read_frame(io.BytesIO(b"\n{\"jsonrpc\":\"2.0\",\"method\":\"fixture\"}")),
+            with self.subTest(frame=frame), self.assertRaises(shim.ProtocolError):
+                shim.decode_frame(frame)
+        self.assertEqual(shim.read_frame(io.BytesIO(b"\n{\"jsonrpc\":\"2.0\",\"method\":\"fixture\"}")),
                          b'{"jsonrpc":"2.0","method":"fixture"}')
 
     def test_eof_drains_the_final_response(self):
@@ -750,7 +746,7 @@ class ShimTests(unittest.TestCase):
         info = probe.receive()["result"]["agentInfo"]
         self.assertEqual(info["name"], "fixture-agent")
         self.assertEqual(info["title"], "Antigravity (DBA)")
-        self.assertTrue(info["version"].endswith(f"+devin-shim-{self.shim.VERSION}"))
+        self.assertTrue(info["version"].endswith(f"+devin-shim-{shim.VERSION}"))
 
     def test_mcp_config_path_is_advertised_only_with_devin_config(self):
         plain = self.probe()
@@ -777,7 +773,7 @@ class ShimTests(unittest.TestCase):
         probe.send({"jsonrpc": "2.0", "id": 2, "method": "test/events", "params": events})
         update = probe.receive()["params"]["update"]
         names = [command["name"] for command in update["availableCommands"]]
-        self.assertEqual(names, ["existing", self.shim.SHIM_COMMAND])
+        self.assertEqual(names, ["existing", shim.SHIM_COMMAND])
         injected = update["availableCommands"][-1]
         self.assertEqual(injected["_meta"], {"cognition.ai/category": "System"})
         self.assertEqual(probe.receive(), {"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
@@ -787,7 +783,7 @@ class ShimTests(unittest.TestCase):
             "method": "session/prompt",
             "params": {
                 "sessionId": "fixture",
-                "prompt": [{"type": "text", "text": f"/{self.shim.SHIM_COMMAND}"}],
+                "prompt": [{"type": "text", "text": f"/{shim.SHIM_COMMAND}"}],
             },
         })
         chunk = probe.receive()
@@ -851,7 +847,7 @@ class ShimTests(unittest.TestCase):
     def test_successful_host_read_completes_without_waiting_for_the_turn(self):
         for order in (("request", "tool", "result"), ("request", "result", "tool")):
             with self.subTest(order=order):
-                bridge = self.shim.Bridge(Path(sys.executable), [], False)
+                bridge = shim.Bridge(Path(sys.executable), [], False)
                 bridge.client_out = io.BytesIO()
                 messages = {
                     "request": {"jsonrpc": "2.0", "id": "read", "method": "fs/read_text_file", "params": {
@@ -868,7 +864,7 @@ class ShimTests(unittest.TestCase):
                     "result": {"jsonrpc": "2.0", "id": "read", "result": {"content": "one\ntwo\nthree\n"}},
                 }
                 for item in order:
-                    frame = self.shim.dump(messages[item])
+                    frame = shim.dump(messages[item])
                     if item == "result":
                         self.assertEqual(bridge.from_client(frame), frame)
                     else:
@@ -888,7 +884,7 @@ class ShimTests(unittest.TestCase):
                     "type": "content", "content": {"type": "text", "text": "3 lines"},
                 }])
                 self.assertTrue(updates[1]["_meta"]["fixture/context"])
-                late = self.shim.dump({"jsonrpc": "2.0", "method": "session/update", "params": {
+                late = shim.dump({"jsonrpc": "2.0", "method": "session/update", "params": {
                     "sessionId": "fixture", "update": {
                         "sessionUpdate": "tool_call_update", "toolCallId": "read-tool",
                         "status": "failed", "rawOutput": "fixture provider failure",
@@ -904,14 +900,14 @@ class ShimTests(unittest.TestCase):
             ({"result": {"content": "one\n"}}, False, "Running view_file"),
         ):
             with self.subTest(response=response, ambiguous=ambiguous, title=title):
-                bridge = self.shim.Bridge(Path(sys.executable), [], False)
+                bridge = shim.Bridge(Path(sys.executable), [], False)
                 bridge.client_out = io.BytesIO()
                 for request_id in ("read", "other") if ambiguous else ("read",):
-                    bridge.from_agent(self.shim.dump({
+                    bridge.from_agent(shim.dump({
                         "jsonrpc": "2.0", "id": request_id, "method": "fs/read_text_file",
                         "params": {"sessionId": "fixture", "path": "/fixture/file.txt"},
                     }))
-                frame = self.shim.dump({"jsonrpc": "2.0", "method": "session/update", "params": {
+                frame = shim.dump({"jsonrpc": "2.0", "method": "session/update", "params": {
                     "sessionId": "fixture", "update": {
                         "sessionUpdate": "tool_call", "toolCallId": "read-tool", "kind": "read",
                         "title": title, "status": "in_progress", "locations": [{"path": "/fixture/file.txt"}],
@@ -920,24 +916,24 @@ class ShimTests(unittest.TestCase):
                 forwarded = bridge.from_agent(frame)
                 if forwarded is not None:
                     bridge.send_client(forwarded)
-                result = self.shim.dump({"jsonrpc": "2.0", "id": "read", **response})
+                result = shim.dump({"jsonrpc": "2.0", "id": "read", **response})
                 self.assertEqual(bridge.from_client(result), result)
                 updates = [json.loads(line) for line in bridge.client_out.getvalue().splitlines()]
                 self.assertEqual(len(updates), 1)
                 self.assertEqual(updates[0]["params"]["update"]["status"], "in_progress")
 
     def test_read_progress_is_session_scoped_and_cleared_after_the_prompt(self):
-        bridge = self.shim.Bridge(Path(sys.executable), [], False)
+        bridge = shim.Bridge(Path(sys.executable), [], False)
         bridge.client_out = io.BytesIO()
-        bridge.from_client(self.shim.dump({
+        bridge.from_client(shim.dump({
             "jsonrpc": "2.0", "id": "turn", "method": "session/prompt",
             "params": {"sessionId": "fixture", "prompt": []},
         }))
-        bridge.from_agent(self.shim.dump({
+        bridge.from_agent(shim.dump({
             "jsonrpc": "2.0", "id": "read", "method": "fs/read_text_file",
             "params": {"sessionId": "fixture", "path": "/fixture/file.txt"},
         }))
-        frame = self.shim.dump({"jsonrpc": "2.0", "method": "session/update", "params": {
+        frame = shim.dump({"jsonrpc": "2.0", "method": "session/update", "params": {
             "sessionId": "other", "update": {
                 "sessionUpdate": "tool_call", "toolCallId": "read-tool", "kind": "read",
                 "title": "Running client_view_file", "status": "in_progress",
@@ -947,15 +943,15 @@ class ShimTests(unittest.TestCase):
         forwarded = bridge.from_agent(frame)
         if forwarded is not None:
             bridge.send_client(forwarded)
-        bridge.from_client(self.shim.dump({"jsonrpc": "2.0", "id": "read", "result": {"content": "one\n"}}))
+        bridge.from_client(shim.dump({"jsonrpc": "2.0", "id": "read", "result": {"content": "one\n"}}))
         self.assertEqual(len(bridge.client_out.getvalue().splitlines()), 1)
-        response = self.shim.dump({"jsonrpc": "2.0", "id": "turn", "result": {"stopReason": "end_turn"}})
+        response = shim.dump({"jsonrpc": "2.0", "id": "turn", "result": {"stopReason": "end_turn"}})
         self.assertEqual(bridge.from_agent(response), response)
         self.assertNotIn(("fixture", "/fixture/file.txt"), bridge.read_calls)
         self.assertNotIn("read", bridge.read_requests)
 
     def test_devin_picker_model_ids_round_trip_to_provider_values(self):
-        bridge = self.shim.Bridge(Path(sys.executable), [], False)
+        bridge = shim.Bridge(Path(sys.executable), [], False)
         bridge.pending["new-session"] = "session/new"
         response = {
             "jsonrpc": "2.0",
@@ -979,7 +975,7 @@ class ShimTests(unittest.TestCase):
                 }],
             },
         }
-        translated = json.loads(bridge.from_agent(self.shim.dump(response)))
+        translated = json.loads(bridge.from_agent(shim.dump(response)))
         option = translated["result"]["configOptions"][0]
         self.assertEqual(option["currentValue"], "gemini-3-6-flash-low")
         self.assertEqual([item["value"] for item in option["options"]], [
@@ -992,7 +988,7 @@ class ShimTests(unittest.TestCase):
             "gpt-oss-120b",
         ])
 
-        request = self.shim.dump({
+        request = shim.dump({
             "jsonrpc": "2.0",
             "id": "switch",
             "method": "session/set_config_option",
@@ -1001,7 +997,7 @@ class ShimTests(unittest.TestCase):
         forwarded = json.loads(bridge.from_client(request))
         self.assertEqual(forwarded["params"]["value"], "gemini-3.6-flash-low")
 
-        flash_request = self.shim.dump({
+        flash_request = shim.dump({
             "jsonrpc": "2.0",
             "id": "switch-flash",
             "method": "session/set_config_option",
@@ -1020,7 +1016,7 @@ class ShimTests(unittest.TestCase):
             ("claude-sonnet-4-6-thinking", "claude-sonnet-4-6"),
         ):
             with self.subTest(model_uid=model_uid):
-                alias_request = self.shim.dump({
+                alias_request = shim.dump({
                     "jsonrpc": "2.0",
                     "id": "switch-alias",
                     "method": "session/set_config_option",
@@ -1034,8 +1030,8 @@ class ShimTests(unittest.TestCase):
                 self.assertEqual(alias_forwarded["params"]["value"], provider_value)
 
     def test_devin_picker_remaps_model_option_updates(self):
-        bridge = self.shim.Bridge(Path(sys.executable), [], False)
-        frame = self.shim.dump({
+        bridge = shim.Bridge(Path(sys.executable), [], False)
+        frame = shim.dump({
             "jsonrpc": "2.0",
             "method": "session/update",
             "params": {
@@ -1056,7 +1052,7 @@ class ShimTests(unittest.TestCase):
         option = translated["params"]["update"]["configOptions"][0]
         self.assertEqual(option["currentValue"], "gemini-3-8-flash-high")
         self.assertEqual(option["options"][0]["value"], "gemini-3-8-flash-high")
-        request = self.shim.dump({
+        request = shim.dump({
             "jsonrpc": "2.0",
             "id": "switch",
             "method": "session/set_config_option",
@@ -1066,7 +1062,7 @@ class ShimTests(unittest.TestCase):
         self.assertEqual(forwarded["params"]["value"], "gemini-3.8-flash-high")
 
     def test_native_mode_labels_and_icons_preserve_wire_values(self):
-        bridge = self.shim.Bridge(Path(sys.executable), [], False)
+        bridge = shim.Bridge(Path(sys.executable), [], False)
         payload = {
             "modes": {"currentModeId": "default", "availableModes": [
                 {"id": "default", "name": "Default"},
@@ -1083,7 +1079,7 @@ class ShimTests(unittest.TestCase):
                 ]},
             ],
         }
-        frame = self.shim.dump({"jsonrpc": "2.0", "id": "modes", "result": payload})
+        frame = shim.dump({"jsonrpc": "2.0", "id": "modes", "result": payload})
         result = json.loads(bridge.from_agent(frame))["result"]
         self.assertEqual(result["modes"]["currentModeId"], "default")
         self.assertEqual([mode["id"] for mode in result["modes"]["availableModes"]], ["default", "auto_edit", "yolo"])
@@ -1099,15 +1095,15 @@ class ShimTests(unittest.TestCase):
         self.assertEqual(options[3], payload["configOptions"][1]["options"][3])
         self.assertEqual(result["configOptions"][0], payload["configOptions"][0])
         self.assertNotIn("ask", [option["value"] for option in options])
-        request = self.shim.dump({
+        request = shim.dump({
             "jsonrpc": "2.0", "id": "switch", "method": "session/set_config_option",
             "params": {"sessionId": "fixture", "configId": "mode", "value": "yolo"},
         })
         self.assertEqual(bridge.from_client(request), request)
 
     def test_mode_icons_are_added_to_updates_without_overwriting_provider_icons(self):
-        bridge = self.shim.Bridge(Path(sys.executable), [], False)
-        frame = self.shim.dump({"jsonrpc": "2.0", "method": "session/update", "params": {
+        bridge = shim.Bridge(Path(sys.executable), [], False)
+        frame = shim.dump({"jsonrpc": "2.0", "method": "session/update", "params": {
             "sessionId": "fixture", "update": {
                 "sessionUpdate": "config_option_update", "configOptions": [{
                     "id": "mode", "category": "mode", "type": "select", "currentValue": "yolo",
@@ -1138,7 +1134,7 @@ class ShimTests(unittest.TestCase):
 
     def test_debug_log_is_private_redacts_credentials_and_keeps_valid_bounded_jsonl(self):
         log = Path(self.directory.name) / "private-debug.jsonl"
-        debug = self.shim.DebugLog(log)
+        debug = shim.DebugLog(log)
         debug.write({"dir": "c2a", "msg": {
             "method": "session/new",
             "params": {
@@ -1149,7 +1145,7 @@ class ShimTests(unittest.TestCase):
         }})
         debug.write({"dir": "a2c", "msg": {
             "method": "session/update",
-            "content": "x" * (self.shim.LOG_LINE_BYTES + 1),
+            "content": "x" * (LOG_LINE_BYTES + 1),
         }})
         debug.file.close()
         content = log.read_text()
@@ -1158,7 +1154,7 @@ class ShimTests(unittest.TestCase):
         self.assertNotIn("PRIVATE_CREDENTIAL", content)
         records = [json.loads(line) for line in content.splitlines()]
         self.assertEqual(records[1]["msg"]["event"], "frame_truncated")
-        self.assertLessEqual(max(map(len, content.splitlines())), self.shim.LOG_LINE_BYTES)
+        self.assertLessEqual(max(map(len, content.splitlines())), LOG_LINE_BYTES)
         if os.name == "posix":
             self.assertEqual(log.stat().st_mode & 0o077, 0)
 

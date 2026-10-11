@@ -27,10 +27,11 @@ fi
 home_dir=${HOME:?HOME must be set}
 python=${PYTHON:-python3}
 root_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-source_shim="$root_dir/bin/antigravity-acp.py"
-source_integration="$root_dir/bin/devin-better-integration.py"
-install_shim=${DEVIN_BETTER_ACP_SHIM_PATH:-"$home_dir/.local/bin/devin-antigravity-acp.py"}
-install_integration="$(dirname -- "$install_shim")/devin-better-integration.py"
+source_shim="$root_dir/source/antigravity/acp.py"
+source_integration="$root_dir/source/antigravity/integration.py"
+install_dir=${DEVIN_BETTER_ACP_INSTALL_DIR:-"$home_dir/.local/lib/devin-better-acp"}
+install_shim="$install_dir/source/antigravity/acp.py"
+install_integration="$install_dir/source/antigravity/integration.py"
 server_path=${AGY_ACP_SERVER_PATH:-"$home_dir/.local/opt/agy-acp/current/agy_acp_server.par"}
 registry_path=${DEVIN_ACP_REGISTRY_PATH:-"$home_dir/.windsurf/acp/registry.json"}
 
@@ -105,15 +106,17 @@ if (( dry_run )); then
     exit 0
 fi
 
-mkdir -p -- "$(dirname -- "$install_shim")" "$(dirname -- "$registry_path")"
-integration_tmp=$(mktemp "${install_integration}.XXXXXX")
-shim_tmp=$(mktemp "${install_shim}.XXXXXX")
-trap 'rm -f -- "$integration_tmp" "$shim_tmp"' EXIT
-cp -- "$source_integration" "$integration_tmp"
-cp -- "$source_shim" "$shim_tmp"
-chmod 755 "$integration_tmp" "$shim_tmp"
-mv -f -- "$integration_tmp" "$install_integration"
-mv -f -- "$shim_tmp" "$install_shim"
+mkdir -p -- "$install_dir/source/antigravity" "$(dirname -- "$registry_path")"
+module_tmp=""
+trap 'rm -f -- "$module_tmp"' EXIT
+for source_file in "$root_dir/source/__init__.py" "$root_dir"/source/antigravity/*.py; do
+    target="$install_dir/${source_file#"$root_dir/"}"
+    module_tmp=$(mktemp "${target}.XXXXXX")
+    cp -- "$source_file" "$module_tmp"
+    chmod 644 "$module_tmp"
+    mv -f -- "$module_tmp" "$target"
+done
+chmod 755 "$install_shim" "$install_integration"
 
 "$python" - "$registry_path" "$registry_json" <<'PY'
 import json

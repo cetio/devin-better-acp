@@ -1,6 +1,6 @@
-import { CliExit, runCli } from "../process/runner";
-import type { Version } from "../process/version";
-import { ConnectionState, MetadataEntry, ProviderId, UsagePool } from "../allowance/model";
+import { CliExit, runCli } from "./process/runner";
+import type { Version } from "./process/version";
+import { ConnectionState, MetadataEntry, ProviderId, UsagePool } from "./allowance/model";
 
 export type ProviderInvocation = {
     command: string;

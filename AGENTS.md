@@ -45,9 +45,12 @@ devin-desktop --user-data-dir=/tmp/devin-better-acp-dev --extensions-dir=/tmp/de
 
 ## ACP shim
 
-`bin/antigravity-acp.py` is a standalone Python 3.10+ ACP bridge, separate from
+`source/antigravity/acp.py` is the Python 3.10+ ACP entrypoint, separate from
 read-only usage monitoring. It forwards sessions, MCP definitions, tools,
 permissions, and client capabilities without rebuilding the conversation.
+The neighboring modules separate protocol framing, message bridging, MCP
+configuration, model translation, presentation, and diagnostics; `integration.py`
+is the standalone question-tool MCP server.
 `--spoof-zed` changes only the downstream `initialize.clientInfo.name`;
 `--registry-entry` prints a Desktop agent entry. Its `devin-better-antigravity`
 ID opts into Desktop's Devin Local model picker. The shim maps decimal-version

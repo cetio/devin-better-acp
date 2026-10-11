@@ -3,11 +3,11 @@ import { normalizeSettings, refreshIntervalMs, staleAfterMs, UsageSettings } fro
 import { UsageController } from "./monitor";
 import { Diagnostics } from "./diagnostics";
 import { DisplayContext } from "./status/display";
-import { PROVIDER_SPECS } from "./providers/registry";
+import { PROVIDER_SPECS } from "./registry";
 import { UsagePicker } from "./picker/view";
 import { StatusBarView } from "./status/items";
 import { ProviderId, ProviderStatus } from "./allowance/model";
-import { ProviderSetup } from "./providers/adapter";
+import { ProviderSetup } from "./adapter";
 
 import * as vscode from "vscode";
 import { mkdirSync } from "node:fs";
@@ -63,8 +63,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
 
     function render(): void
     {
-        view.update(controller.getStatuses(), displayContext());
-        picker.update(controller.getStatuses(), displayContext());
+        const statuses = controller.getStatuses();
+        view.update(statuses, displayContext());
+        picker.update(statuses, displayContext());
     }
 
     function buildSetups(): ProviderSetup[]

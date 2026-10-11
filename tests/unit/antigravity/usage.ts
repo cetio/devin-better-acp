@@ -3,9 +3,9 @@ import { rmSync } from "node:fs";
 import { test } from "node:test";
 
 import { ConnectionState } from "../../../source/allowance/model";
-import { createAntigravityAdapter, parseUsageReport } from "../../../source/providers/antigravity";
-import { AdapterError, ProviderInvocation } from "../../../source/providers/adapter";
-import { PROVIDER_SPECS } from "../../../source/providers/registry";
+import { createAntigravityAdapter, parseUsageReport } from "../../../source/antigravity/usage";
+import { AdapterError, ProviderInvocation } from "../../../source/adapter";
+import { PROVIDER_SPECS } from "../../../source/registry";
 import { agyScript, agyUsageReport, tempDir, writeScript } from "../../support";
 
 const OBSERVED_AT = 1790000000000;

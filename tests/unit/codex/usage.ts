@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { ConnectionState } from "../../../source/allowance/model";
-import { createCodexAdapter, parseRateLimits } from "../../../source/providers/codex";
-import { AdapterError, ProviderInvocation } from "../../../source/providers/adapter";
+import { createCodexAdapter, parseRateLimits } from "../../../source/codex/usage";
+import { AdapterError, ProviderInvocation } from "../../../source/adapter";
 import { codexPool, codexRateLimits, codexServerScript, tempDir, writeScript } from "../../support";
 
 const OBSERVED_AT = 1790000000000;

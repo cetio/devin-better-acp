@@ -6,7 +6,7 @@ import {
     ProviderId,
     ProviderStatus,
 } from "./allowance/model";
-import { AdapterError, ProviderAdapter, ProviderSetup } from "./providers/adapter";
+import { AdapterError, ProviderAdapter, ProviderSetup } from "./adapter";
 import { formatVersion, parseVersion, versionAtLeast } from "./process/version";
 
 const RESET_GRACE_MS = 5000;

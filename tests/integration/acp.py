@@ -320,7 +320,7 @@ def main() -> int:
         launch = {
             "cmd": sys.executable,
             "args": [
-                str(ROOT / "bin/antigravity-acp.py"),
+                str(ROOT / "source/antigravity/acp.py"),
                 "--spoof-zed",
                 "--",
                 "--uid=",
