@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { AdapterError, AdapterResult, ProviderAdapter, ProviderSetup } from "../../source/adapter";
 import { ConnectionState } from "../../source/allowance/model";
-import { UsageController, TimerHandle } from "../../source/monitor";
+import { TimerHandle, UsageService } from "../../source/usage";
 import { Version } from "../../source/process/version";
 
 class FakeTimers
@@ -96,13 +96,14 @@ function setup(adapter: ProviderAdapter | undefined, enabled = true): ProviderSe
     return { provider: "codex", label: "Codex", enabled, adapter, message };
 }
 
-function makeController(
+function makeUsage(
     timers: FakeTimers,
-    options: { intervalMs?: number; onRefresh?: () => void } = {},
-): UsageController
+    options: { intervalMs?: number; staleAfterMs?: number; onRefresh?: () => void } = {},
+): UsageService
 {
-    return new UsageController({
+    return new UsageService({
         intervalMs: options.intervalMs ?? 300000,
+        staleAfterMs: options.staleAfterMs ?? 600000,
         now: () => timers.now,
         random: () => 0,
         setTimeout: timers.setTimeout,
@@ -121,32 +122,54 @@ test("a successful refresh records a ready snapshot and schedules the next poll"
 {
     const timers = new FakeTimers();
     const { adapter, calls } = makeAdapter();
-    const controller = makeController(timers);
-    controller.configure([setup(adapter)]);
+    const usage = makeUsage(timers);
+    usage.configure([setup(adapter)]);
     await flush();
 
-    const status = controller.getStatuses()[0];
+    const status = usage.getStatuses()[0];
     assert.ok(status !== undefined);
     assert.equal(status.state, ConnectionState.Ready);
     assert.equal(status.cliVersion, "0.160.0");
     assert.equal(status.snapshot?.pools[0]?.windows[0]?.usedPercent, 16);
     assert.equal(calls.version, 1);
     assert.equal(calls.read, 1);
-    assert.deepEqual(timers.delays, [300000]);
-    controller.dispose();
+    assert.deepEqual(timers.delays, [60000, 300000]);
+    usage.dispose();
+});
+
+test("the unified state owns the clock and staleness threshold", async () =>
+{
+    const timers = new FakeTimers();
+    const { adapter } = makeAdapter();
+    const usage = makeUsage(timers, { intervalMs: 0, staleAfterMs: 30000 });
+    usage.configure([setup(adapter)]);
+    await flush();
+
+    const initial = usage.getState();
+    assert.equal(initial.now, 0);
+    assert.equal(initial.staleAfterMs, 30000);
+    assert.deepEqual(timers.delays, [60000]);
+
+    await timers.fireDue();
+    const state = usage.getState();
+    const status = state.statuses[0];
+    assert.equal(state.now, 60000);
+    assert.ok(status?.lastSuccessAt !== undefined);
+    assert.ok(state.now - status.lastSuccessAt > state.staleAfterMs);
+    usage.dispose();
 });
 
 test("concurrent refreshes share a single in-flight request", async () =>
 {
     const timers = new FakeTimers();
     const { adapter, calls } = makeAdapter();
-    const controller = makeController(timers);
-    controller.configure([setup(adapter)]);
-    await Promise.all([controller.refresh("codex"), controller.refresh("codex", { manual: true })]);
+    const usage = makeUsage(timers);
+    usage.configure([setup(adapter)]);
+    await Promise.all([usage.refresh("codex"), usage.refresh("codex", { manual: true })]);
     await flush();
 
     assert.equal(calls.read, 1);
-    controller.dispose();
+    usage.dispose();
 });
 
 test("a transient failure keeps last-known values and backs off", async () =>
@@ -161,21 +184,21 @@ test("a transient failure keeps last-known values and backs off", async () =>
             return sampleResult();
         },
     });
-    const controller = makeController(timers);
-    controller.configure([setup(adapter)]);
+    const usage = makeUsage(timers);
+    usage.configure([setup(adapter)]);
     await flush();
-    assert.equal(controller.getStatuses()[0]?.state, ConnectionState.Ready);
+    assert.equal(usage.getStatuses()[0]?.state, ConnectionState.Ready);
 
     fail = true;
     timers.delays.length = 0;
-    await controller.refresh("codex");
-    const status = controller.getStatuses()[0];
+    await usage.refresh("codex");
+    const status = usage.getStatuses()[0];
     assert.equal(status?.state, ConnectionState.Stale);
     assert.equal(status?.message, "offline");
     assert.equal(status?.snapshot?.pools[0]?.windows[0]?.usedPercent, 16);
     assert.deepEqual(timers.delays, [600000]);
     assert.equal(calls.read, 2);
-    controller.dispose();
+    usage.dispose();
 });
 
 test("an authentication failure clears cached values and stops auto polling", async () =>
@@ -190,18 +213,18 @@ test("an authentication failure clears cached values and stops auto polling", as
             return sampleResult();
         },
     });
-    const controller = makeController(timers);
-    controller.configure([setup(adapter)]);
+    const usage = makeUsage(timers);
+    usage.configure([setup(adapter)]);
     await flush();
 
     fail = true;
     timers.delays.length = 0;
-    await controller.refresh("codex");
-    const status = controller.getStatuses()[0];
+    await usage.refresh("codex");
+    const status = usage.getStatuses()[0];
     assert.equal(status?.state, ConnectionState.AuthRequired);
     assert.equal(status?.snapshot, undefined);
     assert.deepEqual(timers.delays, []);
-    controller.dispose();
+    usage.dispose();
 });
 
 test("the version gate blocks automatic polling until an explicit retry", async () =>
@@ -211,47 +234,47 @@ test("the version gate blocks automatic polling until an explicit retry", async 
         minimumVersion: { major: 1, minor: 2, patch: 16 },
         version: async () => "1.2.15",
     });
-    const controller = makeController(timers);
-    controller.configure([setup(adapter)]);
+    const usage = makeUsage(timers);
+    usage.configure([setup(adapter)]);
     await flush();
 
-    const blocked = controller.getStatuses()[0];
+    const blocked = usage.getStatuses()[0];
     assert.equal(blocked?.state, ConnectionState.Unsupported);
     assert.equal(blocked?.cliVersion, "1.2.15");
     assert.equal(calls.read, 0);
     assert.deepEqual(timers.delays, []);
 
-    await controller.refresh("codex", { manual: true });
+    await usage.refresh("codex", { manual: true });
     await flush();
     assert.equal(calls.read, 1);
-    assert.equal(controller.getStatuses()[0]?.state, ConnectionState.Ready);
-    controller.dispose();
+    assert.equal(usage.getStatuses()[0]?.state, ConnectionState.Ready);
+    usage.dispose();
 });
 
 test("pausing cancels work, clears values, and resumes on request", async () =>
 {
     const timers = new FakeTimers();
     const { adapter, calls } = makeAdapter();
-    const controller = makeController(timers);
-    controller.configure([setup(adapter)]);
+    const usage = makeUsage(timers);
+    usage.configure([setup(adapter)]);
     await flush();
     assert.equal(calls.read, 1);
 
-    controller.setPaused("Trust this workspace to enable usage monitoring.");
-    const paused = controller.getStatuses()[0];
+    usage.setPaused("Trust this workspace to enable usage monitoring.");
+    const paused = usage.getStatuses()[0];
     assert.equal(paused?.state, ConnectionState.Unavailable);
     assert.equal(paused?.message, "Trust this workspace to enable usage monitoring.");
     assert.equal(paused?.snapshot, undefined);
     assert.equal(timers.pending, 0);
 
-    await controller.refresh("codex", { manual: true });
+    await usage.refresh("codex", { manual: true });
     assert.equal(calls.read, 1);
 
-    controller.setPaused(undefined);
+    usage.setPaused(undefined);
     await flush();
     assert.equal(calls.read, 2);
-    assert.equal(controller.getStatuses()[0]?.state, ConnectionState.Ready);
-    controller.dispose();
+    assert.equal(usage.getStatuses()[0]?.state, ConnectionState.Ready);
+    usage.dispose();
 });
 
 test("changing the CLI path resets provider state", async () =>
@@ -259,75 +282,75 @@ test("changing the CLI path resets provider state", async () =>
     const timers = new FakeTimers();
     const first = makeAdapter({ command: "/usr/bin/codex" });
     const second = makeAdapter({ command: "/opt/other/codex" });
-    const controller = makeController(timers);
-    controller.configure([setup(first.adapter)]);
+    const usage = makeUsage(timers);
+    usage.configure([setup(first.adapter)]);
     await flush();
-    assert.equal(controller.getStatuses()[0]?.snapshot !== undefined, true);
+    assert.equal(usage.getStatuses()[0]?.snapshot !== undefined, true);
 
-    controller.configure([setup(second.adapter)]);
-    assert.equal(controller.getStatuses()[0]?.snapshot, undefined);
+    usage.configure([setup(second.adapter)]);
+    assert.equal(usage.getStatuses()[0]?.snapshot, undefined);
     await flush();
     assert.equal(second.calls.read, 1);
     assert.equal(first.calls.read, 1);
-    controller.dispose();
+    usage.dispose();
 });
 
 test("a reset boundary schedules one prompt refresh", async () =>
 {
     const timers = new FakeTimers();
     const { adapter, calls } = makeAdapter({ read: async () => sampleResult(50, 1000) });
-    const controller = makeController(timers);
-    controller.configure([setup(adapter)]);
+    const usage = makeUsage(timers);
+    usage.configure([setup(adapter)]);
     await flush();
 
-    assert.deepEqual(timers.delays, [6000]);
+    assert.deepEqual(timers.delays, [60000, 6000]);
     await timers.fireDue();
     assert.equal(calls.read, 2);
-    controller.dispose();
+    usage.dispose();
 });
 
 test("unfocused windows stop polling and resume when overdue", async () =>
 {
     const timers = new FakeTimers();
     const { adapter, calls } = makeAdapter();
-    const controller = makeController(timers);
-    controller.configure([setup(adapter)]);
+    const usage = makeUsage(timers);
+    usage.configure([setup(adapter)]);
     await flush();
 
-    controller.setFocused(false);
-    assert.equal(timers.pending, 0);
+    usage.setFocused(false);
+    assert.equal(timers.pending, 1);
 
     timers.now += 300000;
-    controller.setFocused(true);
+    usage.setFocused(true);
     await flush();
     assert.equal(calls.read, 2);
-    controller.dispose();
+    usage.dispose();
 });
 
 test("disabled and missing providers do not spawn work", async () =>
 {
     const timers = new FakeTimers();
     const { adapter, calls } = makeAdapter();
-    const controller = makeController(timers);
-    controller.configure([setup(undefined)]);
-    controller.configure([setup(adapter, false)]);
+    const usage = makeUsage(timers);
+    usage.configure([setup(undefined)]);
+    usage.configure([setup(adapter, false)]);
     await flush();
 
     assert.equal(calls.read, 0);
     assert.equal(timers.pending, 0);
-    controller.dispose();
+    usage.dispose();
 });
 
 test("dispose stops timers and further refreshes", async () =>
 {
     const timers = new FakeTimers();
     const { adapter, calls } = makeAdapter();
-    const controller = makeController(timers);
-    controller.configure([setup(adapter)]);
+    const usage = makeUsage(timers);
+    usage.configure([setup(adapter)]);
     await flush();
 
-    controller.dispose();
+    usage.dispose();
     assert.equal(timers.pending, 0);
-    await controller.refresh("codex", { manual: true });
+    await usage.refresh("codex", { manual: true });
     assert.equal(calls.read, 1);
 });

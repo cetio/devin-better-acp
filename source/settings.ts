@@ -1,4 +1,4 @@
-import { PoolId, ProviderId } from "./allowance/model";
+import { ProviderId } from "./allowance/model";
 
 export type ProviderSettings = {
     enabled: boolean;
@@ -9,7 +9,7 @@ export type UsageSettings = {
     providers: Record<ProviderId, ProviderSettings>;
     refreshIntervalSeconds: number;
     alignment: "left" | "right";
-    visibility: Record<PoolId, boolean>;
+    visibility: Record<ProviderId, boolean>;
 };
 
 export type RawSettings = {
@@ -20,8 +20,7 @@ export type RawSettings = {
     refreshIntervalSeconds: unknown;
     alignment: unknown;
     showCodex: unknown;
-    showGemini: unknown;
-    showOther: unknown;
+    showAntigravity: unknown;
 };
 
 export const DEFAULT_SETTINGS: UsageSettings = {
@@ -31,7 +30,7 @@ export const DEFAULT_SETTINGS: UsageSettings = {
     },
     refreshIntervalSeconds: 300,
     alignment: "right",
-    visibility: { codex: true, gemini: true, other: true },
+    visibility: { codex: true, antigravity: true },
 };
 
 export function normalizeSettings(raw: RawSettings): UsageSettings
@@ -51,8 +50,7 @@ export function normalizeSettings(raw: RawSettings): UsageSettings
         alignment: raw.alignment === "left" ? "left" : "right",
         visibility: {
             codex: asBoolean(raw.showCodex, true),
-            gemini: asBoolean(raw.showGemini, true),
-            other: asBoolean(raw.showOther, true),
+            antigravity: asBoolean(raw.showAntigravity, true),
         },
     };
 }

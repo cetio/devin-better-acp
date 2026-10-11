@@ -1,11 +1,11 @@
+import { installAntigravity, antigravityInstallPaths } from "./antigravity/install";
 import { isExecutableFile, resolveCli } from "./process/discovery";
 import { normalizeSettings, refreshIntervalMs, staleAfterMs, UsageSettings } from "./settings";
-import { UsageController } from "./monitor";
+import { UsageOptions, UsageService } from "./usage";
 import { Diagnostics } from "./diagnostics";
-import { DisplayContext } from "./status/display";
 import { PROVIDER_SPECS } from "./registry";
-import { UsagePicker } from "./picker/view";
-import { StatusBarView } from "./status/items";
+import { UsagePicker, PickerFocus } from "./ui/picker";
+import { StatusBarView } from "./ui/status";
 import { ProviderId, ProviderStatus } from "./allowance/model";
 import { ProviderSetup } from "./adapter";
 
@@ -16,7 +16,6 @@ import { join } from "node:path";
 
 const CHATGPT_USAGE_URL = "https://chatgpt.com/settings/usage?tab=overview";
 const SETTINGS_QUERY = "@ext:cet.devin-better-acp";
-const TIME_TICK_MS = 60000;
 const VERSION_TIMEOUT_MS = 10000;
 const UNTRUSTED_MESSAGE = "Trust this workspace to enable usage monitoring.";
 
@@ -31,8 +30,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
     const diagnostics = new Diagnostics();
     let settings = readSettings();
 
-    const controller = new UsageController({
-        intervalMs: refreshIntervalMs(settings),
+    const usage = new UsageService({
+        ...usageOptions(settings),
         now: () => Date.now(),
         random: Math.random,
         setTimeout: (callback, delayMs) =>
@@ -46,26 +45,21 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
     });
     const view = new StatusBarView(settings.alignment, settings.visibility);
     const picker = new UsagePicker({
-        refreshAll: () => controller.refreshAll({ manual: true }),
-        refreshProvider: (provider) => controller.refresh(provider, { manual: true }),
-        retry: (provider) => controller.refresh(provider, { manual: true }),
+        refreshAll: () => usage.refreshAll({ manual: true }),
+        refreshProvider: (provider) => usage.refresh(provider, { manual: true }),
+        retry: (provider) => usage.refresh(provider, { manual: true }),
         configureCli: (provider) => void configureCli(provider),
         openSettings: () => void vscode.commands.executeCommand("workbench.action.openSettings", SETTINGS_QUERY),
-        showDiagnostics: () => diagnostics.show(controller.getStatuses(), displayContext()),
+        showDiagnostics: () => diagnostics.show(usage.getState()),
         openChatGptUsage: () => void vscode.env.openExternal(vscode.Uri.parse(CHATGPT_USAGE_URL)),
         setEnabled: (provider, enabled) => void updateSetting(`${provider}.enabled`, enabled),
     });
 
-    function displayContext(): DisplayContext
-    {
-        return { now: Date.now(), staleAfterMs: staleAfterMs(settings) };
-    }
-
     function render(): void
     {
-        const statuses = controller.getStatuses();
-        view.update(statuses, displayContext());
-        picker.update(statuses, displayContext());
+        const state = usage.getState();
+        view.update(state);
+        picker.update(state);
     }
 
     function buildSetups(): ProviderSetup[]
@@ -120,21 +114,14 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
     }
 
     if (!vscode.workspace.isTrusted)
-        controller.setPaused(UNTRUSTED_MESSAGE);
-    controller.configure(buildSetups());
-    controller.setFocused(vscode.window.state.focused);
+        usage.setPaused(UNTRUSTED_MESSAGE);
+    usage.configure(buildSetups(), usageOptions(settings));
+    usage.setFocused(vscode.window.state.focused);
     render();
 
-    const tick = setInterval(() =>
-    {
-        if (controller.getStatuses().some((status) => status.snapshot !== undefined))
-            render();
-    }, TIME_TICK_MS);
-    tick.unref();
-
     context.subscriptions.push(
-        vscode.workspace.onDidGrantWorkspaceTrust(() => controller.setPaused(undefined)),
-        vscode.window.onDidChangeWindowState((state) => controller.setFocused(state.focused)),
+        vscode.workspace.onDidGrantWorkspaceTrust(() => usage.setPaused(undefined)),
+        vscode.window.onDidChangeWindowState((state) => usage.setFocused(state.focused)),
         vscode.workspace.onDidChangeConfiguration((event) =>
         {
             if (!event.affectsConfiguration("devinBetterACP"))
@@ -142,17 +129,16 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
             settings = readSettings();
             view.setAlignment(settings.alignment);
             view.setVisibility(settings.visibility);
-            controller.updateInterval(refreshIntervalMs(settings));
-            controller.configure(buildSetups());
+            usage.configure(buildSetups(), usageOptions(settings));
             render();
         }),
         vscode.commands.registerCommand("devinBetterACP.showUsage", (focus?: unknown) =>
         {
-            picker.show(controller.getStatuses(), displayContext(), parseFocus(focus));
+            picker.show(usage.getState(), parseFocus(focus));
         }),
         vscode.commands.registerCommand("devinBetterACP.refreshAll", async () =>
         {
-            await controller.refreshAll({ manual: true });
+            await usage.refreshAll({ manual: true });
             render();
         }),
         vscode.commands.registerCommand("devinBetterACP.retry", async (provider?: unknown) =>
@@ -160,7 +146,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
             const target = await resolveProvider(provider);
             if (target === undefined)
                 return;
-            await controller.refresh(target, { manual: true });
+            await usage.refresh(target, { manual: true });
             render();
         }),
         vscode.commands.registerCommand("devinBetterACP.configureCli", async (provider?: unknown) =>
@@ -175,17 +161,44 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
         }),
         vscode.commands.registerCommand("devinBetterACP.showDiagnostics", () =>
         {
-            diagnostics.show(controller.getStatuses(), displayContext());
+            diagnostics.show(usage.getState());
         }),
         vscode.commands.registerCommand("devinBetterACP.openChatGptUsage", () =>
         {
             void vscode.env.openExternal(vscode.Uri.parse(CHATGPT_USAGE_URL));
         }),
+        vscode.commands.registerCommand("devinBetterACP.installAntigravity", async () =>
+        {
+            const paths = antigravityInstallPaths();
+            const confirmation = await vscode.window.showWarningMessage(
+                "Install Devin Better Antigravity?",
+                {
+                    modal: true,
+                    detail: `This copies the ACP shim into ${paths.installDirectory} and updates `
+                        + `${paths.registryPath}. Matching Antigravity entries will be replaced; `
+                        + "unrelated entries are preserved.",
+                },
+                "Install",
+            );
+            if (confirmation !== "Install")
+                return;
+            try
+            {
+                const installed = await installAntigravity(context.extensionUri.fsPath);
+                void vscode.window.showInformationMessage(
+                    `Installed Devin Better Antigravity. Restart Devin Desktop to reload ${installed.registryPath}.`,
+                );
+            }
+            catch (error)
+            {
+                const detail = error instanceof Error ? error.message : "Unknown installation error.";
+                void vscode.window.showErrorMessage(`Devin Better ACP: ${detail}`);
+            }
+        }),
         {
             dispose: () =>
             {
-                clearInterval(tick);
-                controller.dispose();
+                usage.dispose();
                 picker.dispose();
                 view.dispose();
                 diagnostics.dispose();
@@ -194,14 +207,17 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi
     );
 
     return {
-        refreshAll: () => controller.refreshAll({ manual: true }),
-        statuses: () => controller.getStatuses(),
+        refreshAll: () => usage.refreshAll({ manual: true }),
+        statuses: () => usage.getStatuses(),
     };
 }
 
 function readSettings(): UsageSettings
 {
     const configuration = vscode.workspace.getConfiguration("devinBetterACP");
+    const antigravityVisibility = configuration.inspect<boolean>("statusBar.showAntigravity")?.globalValue;
+    const legacyGeminiVisibility = configuration.inspect<boolean>("statusBar.showGemini")?.globalValue;
+    const legacyOtherVisibility = configuration.inspect<boolean>("statusBar.showOther")?.globalValue;
     return normalizeSettings({
         codexEnabled: configuration.get("codex.enabled"),
         codexPath: configuration.get("codex.path"),
@@ -210,9 +226,16 @@ function readSettings(): UsageSettings
         refreshIntervalSeconds: configuration.get("refreshIntervalSeconds"),
         alignment: configuration.get("statusBar.alignment"),
         showCodex: configuration.get("statusBar.showCodex"),
-        showGemini: configuration.get("statusBar.showGemini"),
-        showOther: configuration.get("statusBar.showOther"),
+        showAntigravity: antigravityVisibility ?? ((legacyGeminiVisibility ?? true) || (legacyOtherVisibility ?? true)),
     });
+}
+
+function usageOptions(settings: UsageSettings): UsageOptions
+{
+    return {
+        intervalMs: refreshIntervalMs(settings),
+        staleAfterMs: staleAfterMs(settings),
+    };
 }
 
 function clientVersion(context: vscode.ExtensionContext): string
@@ -263,14 +286,16 @@ async function updateSetting(key: string, value: unknown): Promise<void>
     await vscode.workspace.getConfiguration("devinBetterACP").update(key, value, vscode.ConfigurationTarget.Global);
 }
 
-function parseFocus(value: unknown): { provider: ProviderId; poolId: string } | undefined
+function parseFocus(value: unknown): PickerFocus | undefined
 {
     if (typeof value !== "object" || value === null)
         return undefined;
     const record = value as Record<string, unknown>;
-    if ((record.provider === "codex" || record.provider === "antigravity") && typeof record.poolId === "string")
-        return { provider: record.provider, poolId: record.poolId };
-    return undefined;
+    if (record.provider !== "codex" && record.provider !== "antigravity")
+        return undefined;
+    if (record.poolId === undefined)
+        return { provider: record.provider };
+    return typeof record.poolId === "string" ? { provider: record.provider, poolId: record.poolId } : undefined;
 }
 
 function ensureStorage(path: string): string

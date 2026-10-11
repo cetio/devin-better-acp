@@ -1,14 +1,12 @@
 import {
     ConnectionState,
-    DISPLAY_POOLS,
-    DisplayPool,
-    PoolId,
     ProviderSnapshot,
     ProviderStatus,
     UsagePool,
     UsageWindow,
 } from "../source/allowance/model";
-import type { DisplayContext } from "../source/status/display";
+import type { DisplayContext } from "../source/ui/status";
+import type { UsageState } from "../source/usage";
 
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -244,12 +242,9 @@ export function agyUsageReport(options: {
 export const TEST_NOW = 1000;
 export const TEST_CONTEXT: DisplayContext = { now: TEST_NOW, staleAfterMs: 600000 };
 
-export function testDisplayPool(id: PoolId): DisplayPool
+export function testUsageState(statuses: ProviderStatus[]): UsageState
 {
-    const ret = DISPLAY_POOLS.find((candidate) => candidate.id === id);
-    if (ret === undefined)
-        throw new Error(`Missing display pool: ${id}`);
-    return ret;
+    return { statuses, now: TEST_NOW, staleAfterMs: TEST_CONTEXT.staleAfterMs };
 }
 
 export function testWindow(

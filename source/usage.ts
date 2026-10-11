@@ -10,6 +10,7 @@ import { AdapterError, ProviderAdapter, ProviderSetup } from "./adapter";
 import { formatVersion, parseVersion, versionAtLeast } from "./process/version";
 
 const RESET_GRACE_MS = 5000;
+const TIME_TICK_MS = 60000;
 
 export type TimerHandle = {
     cancel: () => void;
@@ -23,8 +24,18 @@ export type RefreshInfo = {
     cliVersion: string | undefined;
 };
 
-export type ControllerOptions = {
+export type UsageOptions = {
     intervalMs: number;
+    staleAfterMs: number;
+};
+
+export type UsageState = {
+    now: number;
+    staleAfterMs: number;
+    statuses: ProviderStatus[];
+};
+
+export type UsageServiceOptions = UsageOptions & {
     now: () => number;
     random: () => number;
     setTimeout: (callback: () => void, delayMs: number) => TimerHandle;
@@ -50,22 +61,25 @@ type RuntimeState = {
     versionVerdict: VersionVerdict | undefined;
 };
 
-export class UsageController
+export class UsageService
 {
-    private readonly options: ControllerOptions;
+    private readonly options: UsageServiceOptions;
     private readonly states = new Map<ProviderId, RuntimeState>();
     private nextGenerationId = 1;
     private focused = true;
     private paused: string | undefined;
+    private clockTimer: TimerHandle | undefined;
     private disposed = false;
 
-    constructor(options: ControllerOptions)
+    constructor(options: UsageServiceOptions)
     {
         this.options = options;
     }
 
-    configure(setups: ProviderSetup[]): void
+    configure(setups: ProviderSetup[], options?: UsageOptions): void
     {
+        if (options !== undefined)
+            this.setOptions(options, false);
         const seen = new Set<ProviderId>();
         for (const setup of setups)
         {
@@ -91,6 +105,15 @@ export class UsageController
         this.emit();
         for (const state of this.states.values())
             this.start(state);
+    }
+
+    getState(): UsageState
+    {
+        return {
+            statuses: this.getStatuses(),
+            now: this.options.now(),
+            staleAfterMs: this.options.staleAfterMs,
+        };
     }
 
     getStatuses(): ProviderStatus[]
@@ -182,15 +205,6 @@ export class UsageController
         }
     }
 
-    updateInterval(intervalMs: number): void
-    {
-        if (this.options.intervalMs === intervalMs)
-            return;
-        this.options.intervalMs = intervalMs;
-        for (const state of this.states.values())
-            this.scheduleNext(state);
-    }
-
     dispose(): void
     {
         this.disposed = true;
@@ -200,6 +214,7 @@ export class UsageController
             state.generation = this.nextGenerationId++;
         }
         this.states.clear();
+        this.cancelClock();
     }
 
     private createState(setup: ProviderSetup, signature: string): RuntimeState
@@ -410,6 +425,14 @@ export class UsageController
         }
     }
 
+    private cancelClock(): void
+    {
+        if (this.clockTimer === undefined)
+            return;
+        this.clockTimer.cancel();
+        this.clockTimer = undefined;
+    }
+
     private reset(state: RuntimeState): void
     {
         this.cancelWork(state);
@@ -433,7 +456,37 @@ export class UsageController
     {
         if (this.disposed)
             return;
+        if (this.getStatuses().some((status) => status.snapshot !== undefined))
+        {
+            if (this.clockTimer === undefined)
+            {
+                this.clockTimer = this.options.setTimeout(() =>
+                {
+                    this.clockTimer = undefined;
+                    this.emit();
+                }, TIME_TICK_MS);
+            }
+        }
+        else
+            this.cancelClock();
         this.options.onDidChange();
+    }
+
+    private setOptions(options: UsageOptions, notify: boolean): void
+    {
+        const intervalChanged = this.options.intervalMs !== options.intervalMs;
+        const staleChanged = this.options.staleAfterMs !== options.staleAfterMs;
+        if (!intervalChanged && !staleChanged)
+            return;
+        this.options.intervalMs = options.intervalMs;
+        this.options.staleAfterMs = options.staleAfterMs;
+        if (intervalChanged)
+        {
+            for (const state of this.states.values())
+                this.scheduleNext(state);
+        }
+        if (notify)
+            this.emit();
     }
 }
 

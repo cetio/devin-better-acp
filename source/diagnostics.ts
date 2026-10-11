@@ -1,9 +1,9 @@
-import * as vscode from "vscode";
-
-import { ProviderStatus } from "./allowance/model";
 import { formatAge, formatTimestamp } from "./allowance/format";
-import { RefreshInfo } from "./monitor";
-import { DisplayContext, describeState } from "./status/display";
+import { ProviderStatus } from "./allowance/model";
+import { RefreshInfo, UsageState } from "./usage";
+import { describeState } from "./ui/status";
+
+import * as vscode from "vscode";
 
 const MAX_EVENTS = 50;
 
@@ -24,17 +24,17 @@ export class Diagnostics
             this.events.shift();
     }
 
-    show(statuses: ProviderStatus[], context: DisplayContext): void
+    show(state: UsageState): void
     {
         this.channel.clear();
-        this.channel.appendLine(`Devin Better ACP diagnostics \u2014 ${formatTimestamp(context.now)}`);
-        for (const status of statuses)
+        this.channel.appendLine(`Devin Better ACP diagnostics \u2014 ${formatTimestamp(state.now)}`);
+        for (const status of state.statuses)
         {
             this.channel.appendLine("");
-            this.channel.appendLine(`${status.label}: ${status.state} (${describeState(status, context)})`);
+            this.channel.appendLine(`${status.label}: ${status.state} (${describeState(status, state)})`);
             this.channel.appendLine(`  CLI: ${status.cliVersion ?? "unknown"}`);
             this.channel.appendLine(`  Last attempt: ${attemptText(status)}`);
-            this.channel.appendLine(`  Last success: ${successText(status, context)}`);
+            this.channel.appendLine(`  Last success: ${successText(status, state)}`);
             if (status.message !== undefined)
                 this.channel.appendLine(`  Message: ${status.message}`);
             for (const pool of status.snapshot?.pools ?? [])
@@ -64,10 +64,10 @@ function attemptText(status: ProviderStatus): string
     return status.lastAttemptAt === undefined ? "never" : formatTimestamp(status.lastAttemptAt);
 }
 
-function successText(status: ProviderStatus, context: DisplayContext): string
+function successText(status: ProviderStatus, state: UsageState): string
 {
     if (status.lastSuccessAt === undefined)
         return "never";
-    const age = formatAge(context.now - status.lastSuccessAt);
+    const age = formatAge(state.now - status.lastSuccessAt);
     return `${formatTimestamp(status.lastSuccessAt)} (${age})`;
 }

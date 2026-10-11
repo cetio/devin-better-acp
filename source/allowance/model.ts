@@ -1,7 +1,5 @@
 export type ProviderId = "codex" | "antigravity";
 
-export type PoolId = "codex" | "gemini" | "other";
-
 export enum ConnectionState
 {
     Loading = "loading",
@@ -53,25 +51,7 @@ export type ProviderStatus = {
     lastSuccessAt: number | undefined;
 };
 
-export type DisplayPool = {
-    id: PoolId;
-    label: string;
-    provider: ProviderId;
-    poolId: string;
-};
-
-export const DISPLAY_POOLS: DisplayPool[] = [
-    { id: "codex", label: "Codex", provider: "codex", poolId: "codex" },
-    { id: "gemini", label: "Gemini (AG)", provider: "antigravity", poolId: "gemini" },
-    { id: "other", label: "Other (AG)", provider: "antigravity", poolId: "other" },
-];
-
 export function expectedPoolIds(provider: ProviderId): string[]
 {
     return provider === "codex" ? ["codex"] : ["gemini", "other"];
-}
-
-export function findPool(status: ProviderStatus, poolId: string): UsagePool | undefined
-{
-    return status.snapshot?.pools.find((pool) => pool.id === poolId);
 }
