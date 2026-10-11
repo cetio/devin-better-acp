@@ -38,20 +38,19 @@ Reload the window after installing.
 
 | Surface | Behaviour |
 | --- | --- |
-| Status bar | One labelled item per pool with no percentage. The native warning or error background tracks the most-used limit. |
-| Hover | One line such as `5h: 6% quota used · Weekly: 17% quota used`, plus a muted line when the values are stale. |
-| Click | Opens the native Quick Pick focused on the clicked pool. Each limit row shows its used percentage and reset time. |
-| Navigation | Back steps from the settings page to the pool, then to the overview. |
+| Status bar | One labelled item per provider with no percentage. The native warning or error background tracks its most-used limit. |
+| Hover | Codex shows its windows on one line; Antigravity shows Gemini and Other pools separately, with a muted stale-data note when needed. |
+| Click | Opens the native Quick Pick focused on that provider. Antigravity includes both pools; each limit row shows usage and reset time. |
+| Navigation | Back steps from the settings page to the provider, then to the overview. |
 | Refresh | The toolbar refresh updates the selected provider. The overview refreshes both. |
 
-Antigravity meters the Gemini models and the Claude and GPT models as separate
-pools, so Other (AG) does not describe the standalone Codex subscription. Codex
-shows its plan and credit metadata under Details. Missing usage values stay
+Antigravity meters Gemini and the Claude and GPT models as separate pools.
+Codex shows its plan and credit metadata under Details. Missing usage values stay
 missing and stale results are labelled rather than shown as zero.
 
-The items use stable identifiers (`devinBetterACP.codex`, `devinBetterACP.gemini`,
-`devinBetterACP.other`), so the host's own hide and show menu and the visibility
-settings both work.
+The status items use stable identifiers (`devinBetterACP.codex` and
+`devinBetterACP.antigravity`), so the host's own hide and show menu and the
+visibility settings both work.
 
 ## Settings
 
@@ -64,8 +63,7 @@ settings both work.
 | `devinBetterACP.refreshIntervalSeconds` | `300` | Background refresh interval. `0` refreshes at startup and on request only. |
 | `devinBetterACP.statusBar.alignment` | `right` | Status-bar side |
 | `devinBetterACP.statusBar.showCodex` | `true` | Show the Codex item |
-| `devinBetterACP.statusBar.showGemini` | `true` | Show the Gemini (AG) item |
-| `devinBetterACP.statusBar.showOther` | `true` | Show the Other (AG) item |
+| `devinBetterACP.statusBar.showAntigravity` | `true` | Show the Antigravity item |
 
 Refreshes pause while the window is unfocused and back off after transient
 failures. Polling stops after a sign-in, missing-CLI, or unsupported result
@@ -82,6 +80,14 @@ until you retry. Monitoring is paused in untrusted workspaces.
 | `Devin Better ACP: Open Settings` | Open the extension settings |
 | `Devin Better ACP: Show Diagnostics` | Show classified provider state and recent refresh events |
 | `Devin Better ACP: Open ChatGPT Usage Page` | Open the account usage page for Codex |
+| `Devin Better ACP: Install Devin Better Antigravity` | Copy the ACP shim and update the local agent registry |
+
+The installer confirms before writing, copies the shim to `~/.local/lib/devin-better-acp`,
+and merges the agent into `~/.windsurf/acp/registry.json`. The default Antigravity
+ACP server path is `~/.local/opt/agy-acp/current/agy_acp_server.par`; existing
+matching entries are replaced and unrelated entries are preserved. Restart
+Devin Desktop after installation. `DEVIN_BETTER_ACP_INSTALL_DIR`,
+`AGY_ACP_SERVER_PATH`, `DEVIN_ACP_REGISTRY_PATH`, and `PYTHON` override defaults.
 
 ## How It Works
 

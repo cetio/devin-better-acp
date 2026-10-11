@@ -39,7 +39,13 @@ devin-desktop --user-data-dir=/tmp/devin-better-acp-dev --extensions-dir=/tmp/de
 - CLI output is untrusted: validate shapes, bound output size, keep provider
   text escaped in hover markdown, and never surface raw stderr or API bodies.
 - Status items use the host's native status-bar, hover, and Quick Pick APIs with
-  stable identifiers so the application's own visibility controls keep working.
+  stable identifiers `devinBetterACP.codex` and `devinBetterACP.antigravity` so
+  the application's own visibility controls keep working. Antigravity is one
+  item that summarizes its Gemini and Other pools.
+- `Install Devin Better Antigravity` is the only write path to the Desktop ACP
+  registry. It installs the Python shim and integration modules and atomically
+  replaces matching agent entries while preserving unrelated entries; it never
+  writes provider configuration or credentials.
 - Diagnostics stay redacted: provider name, CLI version, classified state,
   timings, and successful-refresh age only.
 
@@ -50,7 +56,13 @@ read-only usage monitoring. It forwards sessions, MCP definitions, tools,
 permissions, and client capabilities without rebuilding the conversation.
 The neighboring modules separate protocol framing, message bridging, MCP
 configuration, model translation, presentation, and diagnostics; `integration.py`
-is the standalone question-tool MCP server.
+is the standalone MCP server. It bridges `ask_user_question` to the client's
+`elicitation/create` over the local socket, and serves `batch_execute`,
+`batch_read`, and `batch_write` locally so the agent can run shell commands in
+parallel and read or write several files per call. Batch output is bounded
+(64 KiB per stream, 256 KiB per read, 1 MiB per write, eight items per call),
+command timeouts kill the whole process group, and `DBA_*` environment
+variables are not forwarded to child processes.
 `--spoof-zed` changes only the downstream `initialize.clientInfo.name`;
 `--registry-entry` prints a Desktop agent entry. Its `devin-better-antigravity`
 ID opts into Desktop's Devin Local model picker. The shim maps decimal-version
