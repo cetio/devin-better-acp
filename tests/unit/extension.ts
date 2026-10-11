@@ -141,7 +141,7 @@ test(
     const extensionContext = {
         globalStorageUri: { fsPath: "/tmp/devin-better-acp-extension-test" },
         extensionUri: { fsPath: "/tmp/devin-better-acp-extension" },
-        extension: { packageJSON: { version: "1.0.0" } },
+        extension: { packageJSON: { version: "1.2.0" } },
         subscriptions,
     } as unknown as import("vscode").ExtensionContext;
     const api = extension.activate(extensionContext);
